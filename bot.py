@@ -1,12 +1,14 @@
 import os
 import re
 import asyncio
+import html
 from urllib.parse import quote
 
 import requests
 from aiohttp import web
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,9 +19,8 @@ from telegram.ext import (
 
 
 # =========================================================
-# HZR19 SMART INFORMATION TELEGRAM BOT
+# HZR19 SMART INFORMATION ENGINE
 # NO EXTERNAL AI
-# Wikipedia / MediaWiki + Local Intelligence
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,15 +31,10 @@ if not BOT_TOKEN:
 
 
 # =========================================================
-# HZR19 FOOTER
+# BRAND
 # =========================================================
 
-FOOTER = """
-━━━━━━━━━━━━━━━━━━━━
-        𝕳𝖅𝕽𝟏⁹
-      2010-206
-━━━━━━━━━━━━━━━━━━━━
-"""
+HZR_TAG = "@m19_goat"
 
 
 # =========================================================
@@ -49,7 +45,7 @@ SESSION = requests.Session()
 
 SESSION.headers.update({
     "User-Agent": (
-        "HZR19-Information-Bot/1.0 "
+        "HZR19-Information-Bot/2.0 "
         "(Telegram bot; MediaWiki API client)"
     ),
     "Accept": "application/json",
@@ -57,49 +53,77 @@ SESSION.headers.update({
 
 
 # =========================================================
-# LANGUAGE CONFIGURATION
+# LANGUAGES
 # =========================================================
 
 LANGUAGES = {
     "fa": {
         "name": "فارسی",
         "wiki": "https://fa.wikipedia.org/w/api.php",
-        "rtl": True,
     },
 
     "ps": {
         "name": "پښتو",
         "wiki": "https://ps.wikipedia.org/w/api.php",
-        "rtl": True,
     },
 
     "ar": {
         "name": "العربية",
         "wiki": "https://ar.wikipedia.org/w/api.php",
-        "rtl": True,
     },
 
     "en": {
         "name": "English",
         "wiki": "https://en.wikipedia.org/w/api.php",
-        "rtl": False,
     },
 }
 
 
 # =========================================================
-# COMMON WORDS
+# LOCAL KNOWLEDGE
+# =========================================================
+
+LOCAL_KNOWLEDGE = {
+
+    "سلام": (
+        "سلام.\n\n"
+        "من HZR19 هستم.\n"
+        "موضوع یا سؤال خود را بفرستید."
+    ),
+
+    "hello": (
+        "Hello.\n\n"
+        "I am HZR19.\n"
+        "Send me a topic or question."
+    ),
+
+    "hi": (
+        "Hello.\n\n"
+        "Send me a topic or question."
+    ),
+
+    "تشکر": "خواهش می‌کنم.",
+    "ممنون": "خواهش می‌کنم.",
+    "thanks": "You're welcome.",
+    "thank you": "You're welcome.",
+}
+
+
+# =========================================================
+# STOP WORDS
 # =========================================================
 
 STOP_WORDS = {
     # Persian / Dari
     "درباره",
     "راجع",
+    "راجب",
     "درمورد",
     "در",
     "مورد",
     "بگو",
     "بگوید",
+    "بگویم",
     "برایم",
     "من",
     "یک",
@@ -125,8 +149,6 @@ STOP_WORDS = {
     "توضیح",
     "توضیحی",
     "معرفی",
-    "معرفی‌اش",
-    "معرفی",
     "میخواهم",
     "می‌خواهم",
     "لطفا",
@@ -135,6 +157,21 @@ STOP_WORDS = {
     "می‌شود",
     "کن",
     "کنید",
+    "درباره‌اش",
+    "راجع‌به",
+
+    # Pashto
+    "په",
+    "اړه",
+    "کې",
+    "څه",
+    "څوک",
+    "دی",
+    "ده",
+    "راکړه",
+    "معلومات",
+    "ووایه",
+    "وایه",
 
     # Arabic
     "عن",
@@ -155,6 +192,9 @@ STOP_WORDS = {
     "ماذا",
     "كيف",
     "أين",
+    "من",
+    "هو",
+    "هي",
 
     # English
     "about",
@@ -177,73 +217,21 @@ STOP_WORDS = {
     "please",
     "give",
     "information",
-    "information",
     "explain",
     "describe",
     "where",
     "when",
     "how",
+    "does",
+    "do",
 }
 
 
 # =========================================================
-# LOCAL KNOWLEDGE
-# =========================================================
-
-LOCAL_KNOWLEDGE = {
-
-    "سلام": (
-        "سلام. من HZR19 هستم.\n\n"
-        "موضوع یا سؤال خود را بفرستید. "
-        "می‌توانید فقط نام یک موضوع را بنویسید، "
-        "مثلاً «افغانستان»، «مسی»، «هوش مصنوعی» یا «تاریخ»."
-    ),
-
-    "hello": (
-        "Hello. I am HZR19.\n\n"
-        "Send me a topic or question and I will search "
-        "my available information sources."
-    ),
-
-    "hi": (
-        "Hello. I am HZR19.\n\n"
-        "Send me a topic or question."
-    ),
-
-    "help": (
-        "می‌توانید یک موضوع یا سؤال بفرستید.\n\n"
-        "نمونه:\n"
-        "• افغانستان\n"
-        "• درباره هوش مصنوعی بگو\n"
-        "• مسی کیست؟\n"
-        "• پایتخت افغانستان چیست؟\n"
-        "• تاریخ چیست؟"
-    ),
-
-    "کمک": (
-        "می‌توانید یک موضوع یا سؤال بفرستید.\n\n"
-        "نمونه:\n"
-        "• افغانستان\n"
-        "• درباره هوش مصنوعی بگو\n"
-        "• مسی کیست؟\n"
-        "• پایتخت افغانستان چیست؟"
-    ),
-
-    "تشکر": "خواهش می‌کنم.",
-    "ممنون": "خواهش می‌کنم.",
-    "thanks": "You're welcome.",
-    "thank you": "You're welcome.",
-}
-
-
-# =========================================================
-# TEXT UTILITIES
+# NORMALIZATION
 # =========================================================
 
 def normalize_text(text: str) -> str:
-    """
-    Normalize Persian/Arabic/English text.
-    """
 
     text = text.strip()
 
@@ -262,124 +250,83 @@ def normalize_text(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    # Remove excessive spaces
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
+# =========================================================
+# LANGUAGE DETECTION
+# =========================================================
+
 def detect_language(text: str) -> str:
-    """
-    Basic local language detector.
-    No AI is used.
-    """
 
     text = normalize_text(text)
 
+    # Pashto characters
+    pashto_chars = "ټځڅډړږښګڼېۍ"
+
+    if any(char in text for char in pashto_chars):
+        return "ps"
+
+    # Arabic characters
+    arabic_chars = "ثذضظصط"
+
+    if any(char in text for char in arabic_chars):
+        return "ar"
+
+    # Persian characters
+    if re.search(r"[گچپژ]", text):
+        return "fa"
+
+    # Arabic-script default
     if re.search(r"[\u0600-\u06FF]", text):
-
-        # Pashto-specific characters
-        pashto_chars = "ټځڅډړږښګڼېۍ"
-        if any(char in text for char in pashto_chars):
-            return "ps"
-
-        # Arabic-specific letters
-        arabic_chars = "ثذضظصط"
-        if any(char in text for char in arabic_chars):
-            return "ar"
-
-        # Default Arabic-script language = Persian/Dari
         return "fa"
 
     return "en"
 
 
+# =========================================================
+# QUERY EXTRACTION
+# =========================================================
+
 def clean_query(text: str) -> str:
-    """
-    Remove conversational filler while preserving the main topic.
-    """
 
     text = normalize_text(text)
 
-    # Remove question marks and common punctuation
-    text = re.sub(r"[؟?!.,،؛:;]+", " ", text)
+    text = re.sub(
+        r"[؟?!.,،؛:;()\[\]{}]+",
+        " ",
+        text
+    )
 
     words = text.split()
 
-    cleaned = []
+    result = []
 
     for word in words:
-
-        lower = word.lower()
-
-        if lower in STOP_WORDS:
-            continue
 
         if word in STOP_WORDS:
             continue
 
-        cleaned.append(word)
+        if word.lower() in STOP_WORDS:
+            continue
 
-    result = " ".join(cleaned).strip()
+        result.append(word)
 
-    # If everything was removed, use original text
-    if not result:
-        result = text
+    cleaned = " ".join(result).strip()
 
-    return result
+    if not cleaned:
+        cleaned = text
 
-
-def shorten_text(text: str, max_chars: int = 3000) -> str:
-    """
-    Local text shortening.
-    Does not use AI.
-    """
-
-    text = re.sub(r"\s+", " ", text).strip()
-
-    if len(text) <= max_chars:
-        return text
-
-    # Prefer ending at a sentence
-    portion = text[:max_chars]
-
-    sentence_positions = [
-        portion.rfind("۔"),
-        portion.rfind("."),
-        portion.rfind("!"),
-        portion.rfind("؟"),
-        portion.rfind("?"),
-    ]
-
-    best = max(sentence_positions)
-
-    if best > int(max_chars * 0.55):
-        return portion[:best + 1].strip()
-
-    return portion.rstrip() + "…"
+    return cleaned
 
 
 # =========================================================
-# LOCAL INTELLIGENCE
+# QUESTION TYPE
 # =========================================================
-
-def local_response(text: str):
-    """
-    Very small internal knowledge layer.
-    """
-
-    normalized = normalize_text(text).lower()
-
-    if normalized in LOCAL_KNOWLEDGE:
-        return LOCAL_KNOWLEDGE[normalized]
-
-    return None
-
 
 def classify_question(text: str) -> str:
-    """
-    Determine the type of question using rules.
-    """
 
     t = normalize_text(text).lower()
 
@@ -401,6 +348,8 @@ def classify_question(text: str) -> str:
         "who was",
         "من هو",
         "من هي",
+        "څوک دی",
+        "څوک ده",
     ]):
         return "who"
 
@@ -411,15 +360,17 @@ def classify_question(text: str) -> str:
         "where was",
         "أين",
         "اين",
+        "چیرته",
+        "چرته",
     ]):
         return "where"
 
     if any(x in t for x in [
         "چه زمانی",
-        "کی",
         "چه وقت",
         "when",
         "متى",
+        "کله",
     ]):
         return "when"
 
@@ -428,6 +379,7 @@ def classify_question(text: str) -> str:
         "چطور",
         "how",
         "كيف",
+        "څنګه",
     ]):
         return "how"
 
@@ -435,6 +387,7 @@ def classify_question(text: str) -> str:
         "چرا",
         "why",
         "لماذا",
+        "ولې",
     ]):
         return "why"
 
@@ -442,13 +395,63 @@ def classify_question(text: str) -> str:
 
 
 # =========================================================
+# TEXT CLEANING
+# =========================================================
+
+def clean_wikipedia_text(text: str) -> str:
+
+    text = re.sub(
+        r"\[[0-9]+\]",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+def smart_shorten(
+    text: str,
+    max_chars: int = 3500
+) -> str:
+
+    text = clean_wikipedia_text(text)
+
+    if len(text) <= max_chars:
+        return text
+
+    cut = text[:max_chars]
+
+    positions = [
+        cut.rfind("۔"),
+        cut.rfind("."),
+        cut.rfind("!"),
+        cut.rfind("؟"),
+        cut.rfind("?"),
+    ]
+
+    best = max(positions)
+
+    if best >= int(max_chars * 0.60):
+        return cut[:best + 1].strip()
+
+    return cut.rstrip() + "…"
+
+
+# =========================================================
 # WIKIPEDIA SEARCH
 # =========================================================
 
-def wikipedia_search(query: str, lang: str, limit: int = 5):
-    """
-    Search Wikipedia using MediaWiki API.
-    """
+def wikipedia_search(
+    query: str,
+    lang: str,
+    limit: int = 8
+):
 
     config = LANGUAGES[lang]
 
@@ -457,29 +460,32 @@ def wikipedia_search(query: str, lang: str, limit: int = 5):
         "list": "search",
         "srsearch": query,
         "srlimit": limit,
+        "srprop": "snippet",
         "format": "json",
         "utf8": 1,
     }
 
     try:
+
         response = SESSION.get(
             config["wiki"],
             params=params,
-            timeout=12,
+            timeout=15
         )
 
         response.raise_for_status()
 
-        data = response.json()
-
-        results = data.get("query", {}).get("search", [])
-
-        return results
+        return (
+            response
+            .json()
+            .get("query", {})
+            .get("search", [])
+        )
 
     except Exception as error:
 
         print(
-            f"WIKIPEDIA SEARCH ERROR [{lang}]:",
+            f"SEARCH ERROR [{lang}]:",
             error
         )
 
@@ -487,13 +493,13 @@ def wikipedia_search(query: str, lang: str, limit: int = 5):
 
 
 # =========================================================
-# WIKIPEDIA PAGE DATA
+# WIKIPEDIA PAGE
 # =========================================================
 
-def wikipedia_page(title: str, lang: str):
-    """
-    Get article extract + thumbnail + page URL.
-    """
+def wikipedia_page(
+    title: str,
+    lang: str
+):
 
     config = LANGUAGES[lang]
 
@@ -507,10 +513,10 @@ def wikipedia_page(title: str, lang: str):
 
         "exintro": 1,
         "explaintext": 1,
-        "exchars": 5000,
+        "exchars": 7000,
 
         "piprop": "thumbnail|original",
-        "pithumbsize": 900,
+        "pithumbsize": 1000,
 
         "inprop": "url",
 
@@ -522,14 +528,17 @@ def wikipedia_page(title: str, lang: str):
         response = SESSION.get(
             config["wiki"],
             params=params,
-            timeout=15,
+            timeout=15
         )
 
         response.raise_for_status()
 
-        data = response.json()
-
-        pages = data.get("query", {}).get("pages", [])
+        pages = (
+            response
+            .json()
+            .get("query", {})
+            .get("pages", [])
+        )
 
         if not pages:
             return None
@@ -540,26 +549,42 @@ def wikipedia_page(title: str, lang: str):
             return None
 
         return {
-            "title": page.get("title", title),
-            "extract": page.get("extract", "").strip(),
+            "title": page.get(
+                "title",
+                title
+            ),
+
+            "extract": page.get(
+                "extract",
+                ""
+            ).strip(),
+
             "thumbnail": (
-                page.get("thumbnail", {}).get("source")
+                page.get(
+                    "thumbnail",
+                    {}
+                ).get("source")
             ),
+
             "original": (
-                page.get("original", {}).get("source")
+                page.get(
+                    "original",
+                    {}
+                ).get("source")
             ),
+
             "url": page.get(
                 "fullurl",
-                f"https://{lang}.wikipedia.org/wiki/"
-                f"{quote(page.get('title', title).replace(' ', '_'))}"
+                ""
             ),
+
             "lang": lang,
         }
 
     except Exception as error:
 
         print(
-            f"WIKIPEDIA PAGE ERROR [{lang}]:",
+            f"PAGE ERROR [{lang}]:",
             error
         )
 
@@ -567,50 +592,55 @@ def wikipedia_page(title: str, lang: str):
 
 
 # =========================================================
-# SMART SEARCH
+# SEARCH ENGINE
 # =========================================================
 
-def find_information(user_text: str):
-    """
-    Main non-AI information engine.
+def find_information(
+    user_text: str
+):
 
-    Strategy:
-    1. Detect language.
-    2. Extract topic.
-    3. Search selected Wikipedia.
-    4. Try other languages if necessary.
-    """
+    language = detect_language(
+        user_text
+    )
 
-    language = detect_language(user_text)
+    query = clean_query(
+        user_text
+    )
 
-    cleaned = clean_query(user_text)
+    if not query:
+        query = user_text
 
-    if not cleaned:
-        cleaned = user_text
+    # User language first
+    languages = [language]
 
-    # First search user's language
-    language_order = [language]
+    # Then international fallbacks
+    for lang in [
+        "fa",
+        "ps",
+        "ar",
+        "en"
+    ]:
 
-    # Then fallback languages
-    for lang in ["fa", "ps", "ar", "en"]:
-        if lang not in language_order:
-            language_order.append(lang)
+        if lang not in languages:
+            languages.append(lang)
 
-    for lang in language_order:
+    for lang in languages:
 
         results = wikipedia_search(
-            cleaned,
+            query,
             lang,
-            limit=5
+            limit=8
         )
 
         if not results:
             continue
 
-        # Try first few search results
-        for result in results[:3]:
+        # Check several results.
+        for result in results[:5]:
 
-            title = result.get("title")
+            title = result.get(
+                "title"
+            )
 
             if not title:
                 continue
@@ -623,9 +653,9 @@ def find_information(user_text: str):
             if not page:
                 continue
 
-            extract = page.get("extract", "")
-
-            if not extract:
+            if not page.get(
+                "extract"
+            ):
                 continue
 
             return page
@@ -634,110 +664,137 @@ def find_information(user_text: str):
 
 
 # =========================================================
-# ANSWER BUILDER
+# SMART ANSWER FORMATTER
 # =========================================================
 
-def build_answer(user_text: str, page: dict) -> str:
-    """
-    Convert retrieved information into a clean HZR19 answer.
-    """
+def build_answer(
+    user_text: str,
+    page: dict
+):
 
-    language = page["lang"]
     title = page["title"]
-    extract = page["extract"]
 
-    question_type = classify_question(user_text)
-
-    extract = shorten_text(
-        extract,
-        max_chars=3000
+    extract = smart_shorten(
+        page["extract"],
+        3500
     )
 
-    if language == "en":
-
-        if question_type == "who":
-            intro = f"Here is information about {title}:"
-
-        elif question_type == "where":
-            intro = f"Information related to {title}:"
-
-        elif question_type == "what":
-            intro = f"{title}:"
-
-        else:
-            intro = f"Information about {title}:"
-
-    elif language == "ar":
-
-        if question_type == "who":
-            intro = f"إليك معلومات عن {title}:"
-
-        elif question_type == "what":
-            intro = f"{title}:"
-
-        else:
-            intro = f"معلومات عن {title}:"
-
-    elif language == "ps":
-
-        if question_type == "who":
-            intro = f"د {title} په اړه معلومات:"
-
-        elif question_type == "what":
-            intro = f"{title}:"
-
-        else:
-            intro = f"د {title} په اړه معلومات:"
-
-    else:
-
-        if question_type == "who":
-            intro = f"درباره «{title}» اطلاعات زیر را پیدا کردم:"
-
-        elif question_type == "what":
-            intro = f"«{title}» چیست؟"
-
-        else:
-            intro = f"درباره «{title}» اطلاعات زیر را پیدا کردم:"
-
-    answer = (
-        f"{intro}\n\n"
-        f"{extract}\n\n"
-        f"منبع: Wikipedia\n"
-        f"{page['url']}"
+    question_type = classify_question(
+        user_text
     )
 
-    return answer
+    lang = page["lang"]
+
+    # -----------------------------------------
+    # Persian / Dari
+    # -----------------------------------------
+
+    if lang == "fa":
+
+        if question_type == "what":
+
+            return (
+                f"**{title}**\n\n"
+                f"{extract}"
+            )
+
+        if question_type == "who":
+
+            return (
+                f"**{title}**\n\n"
+                f"{extract}"
+            )
+
+        return (
+            f"**{title}**\n\n"
+            f"{extract}"
+        )
+
+    # -----------------------------------------
+    # Pashto
+    # -----------------------------------------
+
+    if lang == "ps":
+
+        return (
+            f"**{title}**\n\n"
+            f"{extract}"
+        )
+
+    # -----------------------------------------
+    # Arabic
+    # -----------------------------------------
+
+    if lang == "ar":
+
+        return (
+            f"**{title}**\n\n"
+            f"{extract}"
+        )
+
+    # -----------------------------------------
+    # English
+    # -----------------------------------------
+
+    return (
+        f"**{title}**\n\n"
+        f"{extract}"
+    )
+
+
+# =========================================================
+# FINAL HZR FORMAT
+# =========================================================
+
+def final_format(text: str) -> str:
+
+    return (
+        text.strip()
+        + "\n\n"
+        + HZR_TAG
+    )
 
 
 # =========================================================
 # THINKING ANIMATION
 # =========================================================
 
-async def thinking_animation(message):
+THINKING_FRAMES = [
+    "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂",
+    "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂 ·",
+    "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂 ··",
+]
 
-    dots = 1
+
+async def thinking_animation(
+    message
+):
+
+    index = 0
 
     try:
 
         while True:
 
-            text = (
-                "HZR IS THINKING"
-                + "." * dots
-            )
-
             try:
-                await message.edit_text(text)
+
+                await message.edit_text(
+                    THINKING_FRAMES[index]
+                )
+
             except Exception:
                 pass
 
-            dots += 1
+            index += 1
 
-            if dots > 3:
-                dots = 1
+            if index >= len(
+                THINKING_FRAMES
+            ):
+                index = 0
 
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(
+                0.65
+            )
 
     except asyncio.CancelledError:
         pass
@@ -747,10 +804,13 @@ async def thinking_animation(message):
 
 
 # =========================================================
-# TEXT SPLITTER
+# TELEGRAM MESSAGE SPLITTER
 # =========================================================
 
-def split_message(text: str, limit: int = 3900):
+def split_message(
+    text: str,
+    limit: int = 3900
+):
 
     if len(text) <= limit:
         return [text]
@@ -760,7 +820,11 @@ def split_message(text: str, limit: int = 3900):
     while text:
 
         if len(text) <= limit:
-            parts.append(text)
+
+            parts.append(
+                text.strip()
+            )
+
             break
 
         cut = text.rfind(
@@ -770,6 +834,7 @@ def split_message(text: str, limit: int = 3900):
         )
 
         if cut < 1000:
+
             cut = text.rfind(
                 " ",
                 0,
@@ -789,62 +854,73 @@ def split_message(text: str, limit: int = 3900):
 
 
 # =========================================================
+# SEND IMAGE
+# =========================================================
+
+async def send_image(
+    message,
+    page
+):
+
+    image_url = (
+        page.get("thumbnail")
+        or page.get("original")
+    )
+
+    if not image_url:
+        return
+
+    try:
+
+        await message.reply_photo(
+            photo=image_url
+        )
+
+    except Exception as error:
+
+        print(
+            "IMAGE ERROR:",
+            error
+        )
+
+
+# =========================================================
 # SEND ANSWER
 # =========================================================
 
 async def send_answer(
     update: Update,
     answer: str,
-    page=None,
+    page=None
 ):
 
-    # Remove footer temporarily to ensure
-    # each final message has it correctly.
-    final_text = answer + FOOTER
-
-    parts = split_message(
-        final_text
-    )
-
-    # Send image first if available
+    # Image
     if page:
 
-        image_url = (
-            page.get("thumbnail")
-            or page.get("original")
+        await send_image(
+            update.message,
+            page
         )
 
-        if image_url:
+    # Final answer
+    final_answer = final_format(
+        answer
+    )
 
-            try:
-
-                caption = (
-                    f"تصویر مرتبط با: "
-                    f"{page['title']}"
-                )
-
-                await update.message.reply_photo(
-                    photo=image_url,
-                    caption=caption
-                )
-
-            except Exception as error:
-
-                print(
-                    "IMAGE SEND ERROR:",
-                    error
-                )
+    parts = split_message(
+        final_answer
+    )
 
     for part in parts:
 
         await update.message.reply_text(
             part,
-            disable_web_page_preview=False
+            parse_mode=ParseMode.MARKDOWN
         )
 
 
 # =========================================================
-# START COMMAND
+# START
 # =========================================================
 
 async def start_command(
@@ -852,26 +928,19 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    message = (
+    text = (
         "سلام.\n\n"
-        "من 𝕳𝖅𝕽𝟏⁹ هستم.\n\n"
-        "من برای پاسخ‌گویی از موتور هوش مصنوعی خارجی "
-        "استفاده نمی‌کنم. سیستم اطلاعاتی HZR19 با "
-        "جست‌وجو، تحلیل متن و منابع اطلاعاتی کار می‌کند.\n\n"
-        "می‌توانید فقط نام یک موضوع را بفرستید:\n\n"
-        "• افغانستان\n"
-        "• هوش مصنوعی\n"
-        "• لیونل مسی\n"
-        "• تاریخ\n\n"
-        "یا سؤال کامل بنویسید:\n\n"
-        "«درباره افغانستان بگو»\n"
-        "«مسی کیست؟»\n"
-        "«هوش مصنوعی چیست؟»"
-        + FOOTER
+        "من 𝙃𝙕𝙍𝟏⁹ هستم.\n\n"
+        "موضوع یا سؤال خود را بفرستید.\n\n"
+        "مثلاً:\n"
+        "افغانستان\n"
+        "درباره افغانستان بگو\n"
+        "هوش مصنوعی چیست؟\n"
+        "مسی کیست؟"
     )
 
     await update.message.reply_text(
-        message
+        final_format(text)
     )
 
 
@@ -890,39 +959,45 @@ async def handle_message(
     if not update.message.text:
         return
 
-    user_text = update.message.text.strip()
+    user_text = (
+        update.message.text.strip()
+    )
 
     if not user_text:
         return
 
     print(
-        "USER REQUEST:",
+        "USER:",
         user_text
     )
 
     # -----------------------------------------
-    # Local response
+    # Local responses
     # -----------------------------------------
 
-    local = local_response(
+    normalized = normalize_text(
         user_text
-    )
+    ).lower()
 
-    if local:
+    if normalized in LOCAL_KNOWLEDGE:
 
         await update.message.reply_text(
-            local + FOOTER
+            final_format(
+                LOCAL_KNOWLEDGE[
+                    normalized
+                ]
+            )
         )
 
         return
 
     # -----------------------------------------
-    # Thinking message
+    # Thinking
     # -----------------------------------------
 
     thinking_message = (
         await update.message.reply_text(
-            "HZR IS THINKING."
+            THINKING_FRAMES[0]
         )
     )
 
@@ -934,8 +1009,7 @@ async def handle_message(
 
     try:
 
-        # Run blocking Wikipedia requests
-        # outside the Telegram event loop.
+        # Search without blocking Telegram
         page = await asyncio.to_thread(
             find_information,
             user_text
@@ -949,14 +1023,14 @@ async def handle_message(
         except asyncio.CancelledError:
             pass
 
-        # Delete thinking message
+        # Remove thinking message
         try:
             await thinking_message.delete()
         except Exception:
             pass
 
         # -----------------------------------------
-        # Information found
+        # Result
         # -----------------------------------------
 
         if page:
@@ -975,53 +1049,49 @@ async def handle_message(
             return
 
         # -----------------------------------------
-        # Nothing found
+        # No result
         # -----------------------------------------
 
-        language = detect_language(
+        lang = detect_language(
             user_text
         )
 
-        if language == "en":
+        if lang == "en":
 
             answer = (
-                "I could not find a reliable Wikipedia "
-                "article matching your request.\n\n"
-                "Try writing the topic more clearly."
+                "I could not find enough reliable "
+                "information for this request."
             )
 
-        elif language == "ar":
+        elif lang == "ar":
 
             answer = (
-                "لم أجد مقالة موثوقة مطابقة لطلبك "
-                "في المصادر المتاحة.\n\n"
-                "حاول كتابة الموضوع بشكل أوضح."
+                "لم أتمكن من العثور على معلومات "
+                "موثوقة كافية لهذا الطلب."
             )
 
-        elif language == "ps":
+        elif lang == "ps":
 
             answer = (
-                "ستاسې د غوښتنې لپاره مې مناسبه "
-                "ویکيپیډیا مقاله پیدا نه کړه.\n\n"
-                "موضوع لږ روښانه ولیکئ."
+                "د دې غوښتنې لپاره مې کافي باوري "
+                "معلومات پیدا نه کړل."
             )
 
         else:
 
             answer = (
-                "برای این درخواست اطلاعات مناسبی "
-                "در منابع فعلی پیدا نکردم.\n\n"
-                "لطفاً موضوع را کمی واضح‌تر بنویسید."
+                "برای این درخواست اطلاعات کافی "
+                "و قابل‌اعتمادی پیدا نکردم."
             )
 
         await update.message.reply_text(
-            answer + FOOTER
+            final_format(answer)
         )
 
     except Exception as error:
 
         print(
-            "MESSAGE ERROR:",
+            "HANDLER ERROR:",
             error
         )
 
@@ -1038,22 +1108,26 @@ async def handle_message(
             pass
 
         await update.message.reply_text(
-            "در پردازش درخواست خطایی رخ داد."
-            + FOOTER
+            final_format(
+                "در پردازش درخواست خطایی رخ داد."
+            )
         )
 
 
 # =========================================================
-# RENDER HEALTH CHECK
+# RENDER HEALTH
 # =========================================================
 
-async def health(request):
+async def health(
+    request
+):
 
     return web.Response(
         text=(
-            "HZR19 AI Telegram Bot is online.\n"
+            "HZR19 Smart Information Bot\n"
+            "Status: ONLINE\n"
             "External AI: OFF\n"
-            "Information Engine: Wikipedia/MediaWiki"
+            "Engine: HZR19 Local Intelligence"
         )
     )
 
@@ -1152,7 +1226,7 @@ async def main():
 
 
 # =========================================================
-# ENTRY POINT
+# START
 # =========================================================
 
 if __name__ == "__main__":
