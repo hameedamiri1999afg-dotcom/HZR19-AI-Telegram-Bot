@@ -1,963 +1,1417 @@
-// ========================================
-// ADVANCED WIKIPEDIA BOT ACTIVITY
-// Features: Local Image Caching (Offline Support), Dynamic RTL/LTR,
-// Live Search (Autocomplete), Multi-Language (FA/DA/PS/AR/EN),
-// Copy, Share, Open in Browser, Cancel/Stop Animation, Rename & History Search.
-// ========================================
+hereimport os
+import re
+import ast
+import operator
+import hashlib
+import asyncio
+from collections import defaultdict, deque
 
-final String PREFS_NAME = "WikiSingleActivityPrefs";
+import aiohttp
+from aiohttp import web
 
-final String[] activeChatId = new String[]{
-    String.valueOf(System.currentTimeMillis())
-};
-
-final boolean[] isAnimating = new boolean[]{false};
-final boolean[] cancelRequested = new boolean[]{false};
-
-// ========================================
-// MAIN VIEWS
-// ========================================
-
-final android.widget.FrameLayout mainContainer =
-    new android.widget.FrameLayout(ChatbotActivity.this);
-
-final android.widget.LinearLayout listPage =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-
-final android.widget.LinearLayout chatPage =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-
-final android.widget.LinearLayout itemsContainer =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-
-final android.widget.LinearLayout messagesBox =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-
-final android.widget.ScrollView chatScroll =
-    new android.widget.ScrollView(ChatbotActivity.this);
-
-// Suggestions Layout for Live Search
-final android.widget.LinearLayout suggestionsContainer =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-
-mainContainer.setBackgroundColor(0xFF121212);
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 
-// ========================================
-// VIEW 1: CHAT HISTORY PAGE
-// ========================================
+# ============================================================
+# HZR19 CONFIG
+# ============================================================
 
-listPage.setOrientation(android.widget.LinearLayout.VERTICAL);
-listPage.setPadding(24, 24, 24, 24);
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-android.widget.LinearLayout listTopBar =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-listTopBar.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-listTopBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
+PORT = int(os.getenv("PORT", "10000"))
 
-android.widget.TextView listTitle =
-    new android.widget.TextView(ChatbotActivity.this);
-listTitle.setText("تاریخچه چت‌ها / History");
-listTitle.setTextSize(20);
-listTitle.setTypeface(null, android.graphics.Typeface.BOLD);
-listTitle.setTextColor(0xFFFFFFFF);
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "https://hzr19-ai-telegram-bot.onrender.com"
+).rstrip("/")
 
-android.widget.LinearLayout.LayoutParams listTitleParams =
-    new android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
-listTitle.setLayoutParams(listTitleParams);
+WEBHOOK_PATH = "/telegram/webhook"
 
-listTopBar.addView(listTitle);
-listPage.addView(listTopBar);
+HZR_TAG = "@m19_goat"
 
-// Search Bar for History
-final android.widget.EditText searchHistoryField =
-    new android.widget.EditText(ChatbotActivity.this);
-searchHistoryField.setHint("جستجو در چت‌ها / Search History...");
-searchHistoryField.setHintTextColor(0xFF888888);
-searchHistoryField.setTextColor(0xFFFFFFFF);
-searchHistoryField.setTextSize(14);
-searchHistoryField.setPadding(20, 16, 20, 16);
-android.graphics.drawable.GradientDrawable searchBg = new android.graphics.drawable.GradientDrawable();
-searchBg.setColor(0xFF1E1E1E);
-searchBg.setCornerRadius(16f);
-searchHistoryField.setBackground(searchBg);
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing.")
 
-android.widget.LinearLayout.LayoutParams searchHistoryParams =
-    new android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-searchHistoryParams.setMargins(0, 16, 0, 16);
-searchHistoryField.setLayoutParams(searchHistoryParams);
-listPage.addView(searchHistoryField);
+WEBHOOK_SECRET = hashlib.sha256(
+    BOT_TOKEN.encode("utf-8")
+).hexdigest()[:32]
 
-// New Chat Button
-android.widget.Button startNewBtn =
-    new android.widget.Button(ChatbotActivity.this);
-startNewBtn.setText("+ شروع چت جدید / NEW CHAT");
-startNewBtn.setTextSize(16);
-startNewBtn.setTextColor(0xFFFFFFFF);
-startNewBtn.setTypeface(null, android.graphics.Typeface.BOLD);
-android.graphics.drawable.GradientDrawable newBtnBg = new android.graphics.drawable.GradientDrawable();
-newBtnBg.setColor(0xFF0D6EFD);
-newBtnBg.setCornerRadius(20f);
-startNewBtn.setBackground(newBtnBg);
-
-android.widget.LinearLayout.LayoutParams startNewParams =
-    new android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-startNewParams.setMargins(0, 0, 0, 20);
-startNewBtn.setLayoutParams(startNewParams);
-listPage.addView(startNewBtn);
-
-// History Scroll Area
-android.widget.ScrollView listScroll =
-    new android.widget.ScrollView(ChatbotActivity.this);
-itemsContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
-
-listScroll.addView(itemsContainer, new android.widget.ScrollView.LayoutParams(
-    android.widget.ScrollView.LayoutParams.MATCH_PARENT,
-    android.widget.ScrollView.LayoutParams.WRAP_CONTENT));
-
-listPage.addView(listScroll, new android.widget.LinearLayout.LayoutParams(
-    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.0f));
+APPLICATION = None
+HTTP_SESSION = None
 
 
-// ========================================
-// VIEW 2: CHAT PAGE
-// ========================================
+# ============================================================
+# MEMORY
+# ============================================================
 
-chatPage.setOrientation(android.widget.LinearLayout.VERTICAL);
-chatPage.setPadding(16, 16, 16, 16);
-chatPage.setVisibility(android.view.View.GONE);
-
-// Chat Top Bar
-android.widget.LinearLayout chatTopBar =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-chatTopBar.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-chatTopBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
-
-// Back Button
-android.widget.ImageView backBtn =
-    new android.widget.ImageView(ChatbotActivity.this);
-backBtn.setImageResource(android.R.drawable.ic_menu_revert);
-backBtn.setColorFilter(0xFFFFFFFF);
-backBtn.setPadding(16, 16, 16, 16);
-backBtn.setFocusable(true);
-backBtn.setClickable(true);
-android.graphics.drawable.GradientDrawable backBg = new android.graphics.drawable.GradientDrawable();
-backBg.setColor(0xFF2C2C2C);
-backBg.setCornerRadius(100f);
-backBtn.setBackground(backBg);
-backBtn.setLayoutParams(new android.widget.LinearLayout.LayoutParams(96, 96));
-
-android.widget.TextView chatTitle =
-    new android.widget.TextView(ChatbotActivity.this);
-chatTitle.setText("ویکی‌پدیا Bot");
-chatTitle.setTextSize(18);
-chatTitle.setTypeface(null, android.graphics.Typeface.BOLD);
-chatTitle.setTextColor(0xFFFFFFFF);
-chatTitle.setPadding(20, 0, 0, 0);
-
-chatTopBar.addView(backBtn);
-chatTopBar.addView(chatTitle);
-chatPage.addView(chatTopBar);
-
-// Chat Scroll
-chatScroll.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
-    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.0f));
-messagesBox.setOrientation(android.widget.LinearLayout.VERTICAL);
-messagesBox.setPadding(8, 8, 8, 8);
-chatScroll.addView(messagesBox, new android.widget.ScrollView.LayoutParams(
-    android.widget.ScrollView.LayoutParams.MATCH_PARENT, android.widget.ScrollView.LayoutParams.WRAP_CONTENT));
-chatPage.addView(chatScroll);
-
-// Live Search Suggestions Layout
-suggestionsContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
-suggestionsContainer.setVisibility(android.view.View.GONE);
-android.graphics.drawable.GradientDrawable sugBg = new android.graphics.drawable.GradientDrawable();
-sugBg.setColor(0xFF222222);
-sugBg.setCornerRadius(16f);
-suggestionsContainer.setBackground(sugBg);
-chatPage.addView(suggestionsContainer);
-
-// Bottom Bar Layout
-android.widget.LinearLayout bottomBar =
-    new android.widget.LinearLayout(ChatbotActivity.this);
-bottomBar.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-bottomBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
-bottomBar.setPadding(0, 16, 0, 8);
-
-final android.widget.EditText inputField =
-    new android.widget.EditText(ChatbotActivity.this);
-inputField.setHint("موضوع به فارسی، دری، پشتو، عربی یا انگلیسی...");
-inputField.setHintTextColor(0xFF888888);
-inputField.setTextColor(0xFFFFFFFF);
-inputField.setTextSize(15);
-inputField.setMinLines(1);
-inputField.setMaxLines(4);
-inputField.setPadding(24, 20, 24, 20);
-
-android.graphics.drawable.GradientDrawable inputBG = new android.graphics.drawable.GradientDrawable();
-inputBG.setColor(0xFF1E1E1E);
-inputBG.setCornerRadius(24f);
-inputBG.setStroke(2, 0xFF333333);
-inputField.setBackground(inputBG);
-
-android.widget.LinearLayout.LayoutParams inputParams =
-    new android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
-inputParams.setMargins(0, 0, 12, 0);
-inputField.setLayoutParams(inputParams);
-
-final android.widget.ImageView sendBtn =
-    new android.widget.ImageView(ChatbotActivity.this);
-sendBtn.setImageResource(android.R.drawable.ic_menu_send);
-sendBtn.setColorFilter(0xFFFFFFFF);
-sendBtn.setPadding(20, 20, 20, 20);
-sendBtn.setFocusable(true);
-sendBtn.setClickable(true);
-
-android.graphics.drawable.GradientDrawable sendBg = new android.graphics.drawable.GradientDrawable();
-sendBg.setColor(0xFF0D6EFD);
-sendBg.setCornerRadius(100f);
-sendBtn.setBackground(sendBg);
-
-android.widget.LinearLayout.LayoutParams sendParams =
-    new android.widget.LinearLayout.LayoutParams(110, 110);
-sendParams.gravity = android.view.Gravity.CENTER_VERTICAL;
-sendBtn.setLayoutParams(sendParams);
-
-bottomBar.addView(inputField);
-bottomBar.addView(sendBtn);
-chatPage.addView(bottomBar);
-
-mainContainer.addView(listPage);
-mainContainer.addView(chatPage);
-setContentView(mainContainer);
+USER_MEMORY = defaultdict(lambda: deque(maxlen=8))
 
 
-// ========================================
-// UI CONTROLLER
-// ========================================
+def remember(user_id, topic):
+    if topic:
+        USER_MEMORY[user_id].append(topic)
 
-class UIController {
 
-    boolean isRTL(String text) {
-        if (text == null) return false;
-        for (char c : text.toCharArray()) {
-            Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
-            if (block == Character.UnicodeBlock.ARABIC || 
-                block == Character.UnicodeBlock.ARABIC_SUPPLEMENT ||
-                block == Character.UnicodeBlock.ARABIC_EXTENDED_A) {
-                return true;
-            }
-        }
-        return false;
+def get_last_topic(user_id):
+    if USER_MEMORY[user_id]:
+        return USER_MEMORY[user_id][-1]
+    return None
+
+
+# ============================================================
+# TEXT
+# ============================================================
+
+def normalize_text(text):
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    replacements = {
+        "ي": "ی",
+        "ى": "ی",
+        "ك": "ک",
+        "ۀ": "ه",
+        "ة": "ه",
     }
 
-    String getDomain(String text) {
-        if (isRTL(text)) {
-            return "fa.wikipedia.org";
-        }
-        return "en.wikipedia.org";
-    }
-
-    // Download and Cache Image to Local Storage for Offline Use
-    void loadAndCacheImage(final String imageUrl, final android.widget.ImageView imageView, final Runnable onSaved) {
-        if (imageUrl == null || imageUrl.isEmpty()) return;
-
-        // Generate unique local filename from URL hash
-        final String fileName = "wiki_img_" + Math.abs(imageUrl.hashCode()) + ".jpg";
-        final java.io.File file = new java.io.File(getFilesDir(), fileName);
-
-        if (file.exists()) {
-            android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
-            if (bitmap != null) {
-                imageView.setImageBitmap(bitmap);
-                imageView.setVisibility(android.view.View.VISIBLE);
-                if (onSaved != null) onSaved.run();
-                return;
-            }
-        }
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    java.net.URL url = new java.net.URL(imageUrl);
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                    conn.setDoInput(true);
-                    conn.connect();
-                    java.io.InputStream input = conn.getInputStream();
-                    final android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeStream(input);
-
-                    // Save bitmap to internal storage
-                    java.io.FileOutputStream fos = new java.io.FileOutputStream(file);
-                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, fos);
-                    fos.flush();
-                    fos.close();
-
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            imageView.setImageBitmap(bitmap);
-                            imageView.setVisibility(android.view.View.VISIBLE);
-                            if (onSaved != null) onSaved.run();
-                        }
-                    });
-                } catch (Exception e) {
-                    // Try showing if already partly saved
-                    if (file.exists()) {
-                        final android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
-                        if (bitmap != null) {
-                            runOnUiThread(new Runnable() {
-                                @Override
-                                public void run() {
-                                    imageView.setImageBitmap(bitmap);
-                                    imageView.setVisibility(android.view.View.VISIBLE);
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-        }).start();
-    }
-
-    android.graphics.drawable.Drawable createCopyIcon() {
-        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap);
-        android.graphics.Paint paint = new android.graphics.Paint();
-        paint.setColor(0xFFFFFFFF);
-        paint.setStyle(android.graphics.Paint.Style.STROKE);
-        paint.setStrokeWidth(5f);
-        paint.setAntiAlias(true);
-        canvas.drawRoundRect(new android.graphics.RectF(22, 10, 52, 42), 6, 6, paint);
-        canvas.drawRoundRect(new android.graphics.RectF(12, 20, 42, 52), 6, 6, paint);
-        return new android.graphics.drawable.BitmapDrawable(getResources(), bitmap);
-    }
-
-    void setSendButtonState(boolean isCancel) {
-        if (isCancel) {
-            sendBtn.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
-            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setColor(0xFFD32F2F);
-            bg.setCornerRadius(100f);
-            sendBtn.setBackground(bg);
-        } else {
-            sendBtn.setImageResource(android.R.drawable.ic_menu_send);
-            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setColor(0xFF0D6EFD);
-            bg.setCornerRadius(100f);
-            sendBtn.setBackground(bg);
-        }
-    }
-
-    void addBubble(
-        final String text,
-        final String imageUrl,
-        final String pageTitle,
-        final boolean isUser,
-        final boolean save,
-        boolean animate
-    ) {
-        final android.widget.LinearLayout bubbleContainer = new android.widget.LinearLayout(ChatbotActivity.this);
-        bubbleContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
-
-        boolean rtl = isRTL(text);
-
-        android.widget.LinearLayout.LayoutParams params =
-            new android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            );
-        params.setMargins(isUser ? 60 : 0, 10, isUser ? 0 : 60, 10);
-
-        if (isUser) {
-            android.graphics.drawable.GradientDrawable bubble = new android.graphics.drawable.GradientDrawable();
-            bubble.setCornerRadius(24f);
-            bubble.setColor(0xFF424242);
-            bubbleContainer.setBackground(bubble);
-        }
-
-        bubbleContainer.setLayoutParams(params);
-
-        if (isUser) {
-            android.widget.TextView userTv = new android.widget.TextView(ChatbotActivity.this);
-            userTv.setText(text);
-            userTv.setTextSize(15);
-            userTv.setTextColor(0xFFFFFFFF);
-            userTv.setTextIsSelectable(true);
-            userTv.setPadding(28, 20, 28, 20);
-            if (rtl) userTv.setGravity(android.view.Gravity.RIGHT);
-            bubbleContainer.addView(userTv);
-        } else {
-            // Optional Image View with Local Cache
-            if (imageUrl != null && !imageUrl.isEmpty()) {
-                final android.widget.ImageView imgView = new android.widget.ImageView(ChatbotActivity.this);
-                imgView.setVisibility(android.view.View.GONE);
-                imgView.setAdjustViewBounds(true);
-                imgView.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-                imgView.setPadding(28, 20, 28, 0);
-                bubbleContainer.addView(imgView);
-
-                loadAndCacheImage(imageUrl, imgView, new Runnable() {
-                    @Override
-                    public void run() {
-                        if (save) {
-                            saveMessageToPrefs(text, imageUrl, pageTitle, isUser);
-                        }
-                    }
-                });
-            }
-
-            final android.widget.LinearLayout textContainer = new android.widget.LinearLayout(ChatbotActivity.this);
-            textContainer.setOrientation(android.widget.LinearLayout.VERTICAL);
-            textContainer.setPadding(28, 16, 28, 10);
-            bubbleContainer.addView(textContainer);
-
-            if (animate) {
-                isAnimating[0] = true;
-                cancelRequested[0] = false;
-                setSendButtonState(true);
-
-                final String[] lines = text.split("\n", -1);
-                final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
-                final int[] lineIndex = new int[]{0};
-
-                Runnable lineAnimation = new Runnable() {
-                    @Override
-                    public void run() {
-                        if (cancelRequested[0] || lineIndex[0] >= lines.length) {
-                            isAnimating[0] = false;
-                            setSendButtonState(false);
-                            return;
-                        }
-
-                        final android.widget.TextView lineTv = new android.widget.TextView(ChatbotActivity.this);
-                        String currentLine = lines[lineIndex[0]];
-                        if (currentLine.trim().isEmpty()) {
-                            lineTv.setText(" ");
-                            lineTv.setHeight(20);
-                        } else {
-                            lineTv.setText(currentLine);
-                        }
-
-                        lineTv.setTextSize(15);
-                        lineTv.setTextColor(0xFFE0E0E0);
-                        lineTv.setTextIsSelectable(true);
-                        if (isRTL(currentLine)) {
-                            lineTv.setGravity(android.view.Gravity.RIGHT);
-                        }
-
-                        textContainer.addView(lineTv);
-                        lineTv.setAlpha(0f);
-                        lineTv.setTranslationY(-35f);
-                        lineTv.animate().alpha(1f).translationY(0f).setDuration(200).start();
-
-                        chatScroll.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                chatScroll.fullScroll(android.view.View.FOCUS_DOWN);
-                            }
-                        });
-
-                        lineIndex[0]++;
-                        handler.postDelayed(this, 220);
-                    }
-                };
-                handler.post(lineAnimation);
-            } else {
-                String[] lines = text.split("\n", -1);
-                for (String line : lines) {
-                    android.widget.TextView lineTv = new android.widget.TextView(ChatbotActivity.this);
-                    if (line.trim().isEmpty()) {
-                        lineTv.setText(" ");
-                        lineTv.setHeight(20);
-                    } else {
-                        lineTv.setText(line);
-                    }
-                    lineTv.setTextSize(15);
-                    lineTv.setTextColor(0xFFE0E0E0);
-                    lineTv.setTextIsSelectable(true);
-                    if (isRTL(line)) lineTv.setGravity(android.view.Gravity.RIGHT);
-                    textContainer.addView(lineTv);
-                }
-            }
-
-            // Copy + Share + Open Browser
-            android.widget.LinearLayout actionLayout = new android.widget.LinearLayout(ChatbotActivity.this);
-            actionLayout.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            actionLayout.setGravity(android.view.Gravity.END);
-            actionLayout.setPadding(0, 4, 16, 12);
-
-            if (pageTitle != null && !pageTitle.isEmpty()) {
-                final android.widget.ImageView webBtn = new android.widget.ImageView(ChatbotActivity.this);
-                webBtn.setImageResource(android.R.drawable.ic_menu_compass);
-                webBtn.setColorFilter(0xFFFFFFFF);
-                webBtn.setPadding(12, 12, 12, 12);
-                webBtn.setFocusable(true);
-                webBtn.setClickable(true);
-                android.graphics.drawable.GradientDrawable webBg = new android.graphics.drawable.GradientDrawable();
-                webBg.setColor(0xFF333333);
-                webBg.setCornerRadius(50f);
-                webBtn.setBackground(webBg);
-                android.widget.LinearLayout.LayoutParams webParams = new android.widget.LinearLayout.LayoutParams(84, 84);
-                webParams.setMargins(0, 0, 10, 0);
-                webBtn.setLayoutParams(webParams);
-
-                webBtn.setOnClickListener(new android.view.View.OnClickListener() {
-                    @Override
-                    public void onClick(android.view.View v) {
-                        try {
-                            String domain = getDomain(text);
-                            String webUrl = "https://" + domain + "/wiki/" + java.net.URLEncoder.encode(pageTitle, "UTF-8");
-                            android.content.Intent browserIntent = new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(webUrl));
-                            startActivity(browserIntent);
-                        } catch (Exception e) {}
-                    }
-                });
-                actionLayout.addView(webBtn);
-            }
-
-            final android.widget.ImageView copyBtn = new android.widget.ImageView(ChatbotActivity.this);
-            copyBtn.setImageDrawable(createCopyIcon());
-            copyBtn.setPadding(12, 12, 12, 12);
-            copyBtn.setFocusable(true);
-            copyBtn.setClickable(true);
-            android.graphics.drawable.GradientDrawable copyBg = new android.graphics.drawable.GradientDrawable();
-            copyBg.setColor(0xFF333333);
-            copyBg.setCornerRadius(50f);
-            copyBtn.setBackground(copyBg);
-            android.widget.LinearLayout.LayoutParams copyParams = new android.widget.LinearLayout.LayoutParams(84, 84);
-            copyParams.setMargins(0, 0, 10, 0);
-            copyBtn.setLayoutParams(copyParams);
-
-            copyBtn.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override
-                public void onClick(android.view.View v) {
-                    android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(android.content.Context.CLIPBOARD_SERVICE);
-                    android.content.ClipData clip = android.content.ClipData.newPlainText("Copied Text", text);
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(clip);
-                        android.widget.Toast.makeText(ChatbotActivity.this, "Copied ✓ کاپی شد", android.widget.Toast.LENGTH_SHORT).show();
-                    }
-                }
-            });
-
-            final android.widget.ImageView shareBtn = new android.widget.ImageView(ChatbotActivity.this);
-            shareBtn.setImageResource(android.R.drawable.ic_menu_share);
-            shareBtn.setColorFilter(0xFFFFFFFF);
-            shareBtn.setPadding(12, 12, 12, 12);
-            shareBtn.setFocusable(true);
-            shareBtn.setClickable(true);
-            android.graphics.drawable.GradientDrawable shareBg = new android.graphics.drawable.GradientDrawable();
-            shareBg.setColor(0xFF333333);
-            shareBg.setCornerRadius(50f);
-            shareBtn.setBackground(shareBg);
-            shareBtn.setLayoutParams(new android.widget.LinearLayout.LayoutParams(84, 84));
-
-            shareBtn.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override
-                public void onClick(android.view.View v) {
-                    try {
-                        android.content.Intent shareIntent = new android.content.Intent(android.content.Intent.ACTION_SEND);
-                        shareIntent.setType("text/plain");
-                        shareIntent.putExtra(android.content.Intent.EXTRA_TEXT, text);
-                        startActivity(android.content.Intent.createChooser(shareIntent, "اشتراک‌گذاری / Share"));
-                    } catch (Exception e) {}
-                }
-            });
-
-            actionLayout.addView(copyBtn);
-            actionLayout.addView(shareBtn);
-            bubbleContainer.addView(actionLayout);
-        }
-
-        messagesBox.addView(bubbleContainer);
-
-        if (animate) {
-            bubbleContainer.setAlpha(0f);
-            bubbleContainer.setTranslationY(40f);
-            bubbleContainer.animate().alpha(1f).translationY(0f).setDuration(250).start();
-        }
-
-        chatScroll.post(new Runnable() {
-            @Override
-            public void run() {
-                chatScroll.fullScroll(android.view.View.FOCUS_DOWN);
-            }
-        });
-
-        if (save && (imageUrl == null || imageUrl.isEmpty())) {
-            saveMessageToPrefs(text, imageUrl, pageTitle, isUser);
-        }
-    }
-
-    void saveMessageToPrefs(String text, String imageUrl, String pageTitle, boolean isUser) {
-        android.content.SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        String history = prefs.getString(activeChatId[0], "");
-        history += (isUser ? "[USER]" : "[BOT]") + text + (imageUrl != null ? "[IMG]" + imageUrl : "") + (pageTitle != null ? "[TITLE]" + pageTitle : "") + "[END_MSG]";
-        prefs.edit().putString(activeChatId[0], history).apply();
-    }
-
-    void renderHistoryList(String filter) {
-        itemsContainer.removeAllViews();
-        android.content.SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        java.util.Map<String, ?> allEntries = prefs.getAll();
-
-        if (allEntries.isEmpty()) {
-            android.widget.TextView emptyTv = new android.widget.TextView(ChatbotActivity.this);
-            emptyTv.setText("چت ذخیره‌شده‌ای وجود ندارد / No saved chats");
-            emptyTv.setTextColor(0xFF888888);
-            emptyTv.setTextSize(15);
-            emptyTv.setPadding(0, 40, 0, 0);
-            emptyTv.setGravity(android.view.Gravity.CENTER);
-            itemsContainer.addView(emptyTv);
-            return;
-        }
-
-        for (final java.util.Map.Entry<String, ?> entry : allEntries.entrySet()) {
-            final String chatId = entry.getKey();
-            if (!chatId.matches("\\d+")) continue;
-
-            String chatData = String.valueOf(entry.getValue());
-            String titleStr = "گفتگو " + chatId;
-
-            if (chatData.contains("[USER]")) {
-                int start = chatData.indexOf("[USER]") + 6;
-                int end = chatData.indexOf("[END_MSG]", start);
-                if (end > start) {
-                    titleStr = chatData.substring(start, end)
-                        .replace("شما:\n", "")
-                        .replace("You:\n", "");
-
-                    int imgIdx = titleStr.indexOf("[IMG]");
-                    if (imgIdx != -1) {
-                        titleStr = titleStr.substring(0, imgIdx);
-                    }
-                    if (titleStr.length() > 40) {
-                        titleStr = titleStr.substring(0, 40) + "...";
-                    }
-                }
-            }
-
-            if (filter != null && !filter.isEmpty() && !titleStr.toLowerCase().contains(filter.toLowerCase())) {
-                continue;
-            }
-
-            android.widget.LinearLayout historyItem = new android.widget.LinearLayout(ChatbotActivity.this);
-            historyItem.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            historyItem.setGravity(android.view.Gravity.CENTER_VERTICAL);
-
-            android.graphics.drawable.GradientDrawable itemBG = new android.graphics.drawable.GradientDrawable();
-            itemBG.setColor(0xFF1E1E1E);
-            itemBG.setCornerRadius(16f);
-            historyItem.setBackground(itemBG);
-
-            android.widget.LinearLayout.LayoutParams historyParams = new android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-            historyParams.setMargins(0, 10, 0, 10);
-            historyItem.setLayoutParams(historyParams);
-
-            android.widget.TextView item = new android.widget.TextView(ChatbotActivity.this);
-            item.setText(titleStr);
-            item.setTextSize(15);
-            item.setTextColor(0xFFFFFFFF);
-            item.setPadding(30, 30, 20, 30);
-            item.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-
-            // Delete Single Item
-            final android.widget.ImageView deleteBtn = new android.widget.ImageView(ChatbotActivity.this);
-            deleteBtn.setImageResource(android.R.drawable.ic_menu_delete);
-            deleteBtn.setColorFilter(0xFFFF5252);
-            deleteBtn.setPadding(18, 18, 18, 18);
-            deleteBtn.setFocusable(true);
-            deleteBtn.setClickable(true);
-
-            android.graphics.drawable.GradientDrawable deleteBg = new android.graphics.drawable.GradientDrawable();
-            deleteBg.setColor(0xFF2C2C2C);
-            deleteBg.setCornerRadius(100f);
-            deleteBtn.setBackground(deleteBg);
-            deleteBtn.setLayoutParams(new android.widget.LinearLayout.LayoutParams(80, 80));
-
-            deleteBtn.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override
-                public void onClick(android.view.View v) {
-                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().remove(chatId).apply();
-                    renderHistoryList(searchHistoryField.getText().toString());
-                }
-            });
-
-            item.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override
-                public void onClick(android.view.View v) {
-                    openChat(chatId);
-                }
-            });
-
-            historyItem.addView(item);
-            historyItem.addView(deleteBtn);
-            itemsContainer.addView(historyItem);
-        }
-    }
-
-    void openChat(String chatId) {
-        activeChatId[0] = chatId;
-        messagesBox.removeAllViews();
-        android.content.SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        String history = prefs.getString(chatId, "");
-
-        if (!history.isEmpty()) {
-            String[] msgs = history.split("\\[END_MSG\\]");
-            for (String msg : msgs) {
-                if (msg.startsWith("[USER]")) {
-                    addBubble(msg.replaceFirst("\\[USER\\]", ""), null, null, true, false, false);
-                } else if (msg.startsWith("[BOT]")) {
-                    String raw = msg.replaceFirst("\\[BOT\\]", "");
-                    String imgUrl = null;
-                    String pTitle = null;
-
-                    if (raw.contains("[IMG]")) {
-                        int imgStart = raw.indexOf("[IMG]");
-                        int titleStart = raw.indexOf("[TITLE]");
-                        if (titleStart > imgStart && imgStart != -1) {
-                            imgUrl = raw.substring(imgStart + 5, titleStart);
-                            pTitle = raw.substring(titleStart + 7);
-                        } else if (imgStart != -1) {
-                            imgUrl = raw.substring(imgStart + 5);
-                        }
-                        if (imgStart != -1) {
-                            raw = raw.substring(0, imgStart);
-                        }
-                    }
-                    addBubble(raw, imgUrl, pTitle, false, false, false);
-                }
-            }
-        } else {
-            addBubble("HZR Wikipedia Bot:\n\nسلام! موضوع مورد نظرتان را به فارسی، دری، پشتو، عربی یا انگلیسی بنویسید.", null, null, false, false, true);
-        }
-
-        listPage.setVisibility(android.view.View.GONE);
-        chatPage.setVisibility(android.view.View.VISIBLE);
-    }
-
-    void fetchSuggestions(final String query) {
-        if (query.trim().length() < 2) {
-            suggestionsContainer.setVisibility(android.view.View.GONE);
-            return;
-        }
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    String domain = getDomain(query);
-                    String encoded = java.net.URLEncoder.encode(query, "UTF-8");
-                    String urlStr = "https://" + domain + "/w/api.php?action=opensearch&format=json&limit=4&search=" + encoded;
-
-                    java.net.URL url = new java.net.URL(urlStr);
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                    conn.setRequestProperty("User-Agent", "Mozilla/5.0");
-
-                    java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(conn.getInputStream(), "UTF-8"));
-                    StringBuilder sb = new StringBuilder();
-                    String l;
-                    while ((l = reader.readLine()) != null) sb.append(l);
-                    reader.close();
-
-                    org.json.JSONArray arr = new org.json.JSONArray(sb.toString());
-                    final org.json.JSONArray suggestions = arr.getJSONArray(1);
-
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            suggestionsContainer.removeAllViews();
-                            if (suggestions.length() == 0) {
-                                suggestionsContainer.setVisibility(android.view.View.GONE);
-                                return;
-                            }
-
-                            for (int i = 0; i < suggestions.length(); i++) {
-                                final String sug = suggestions.optString(i, "");
-                                android.widget.TextView tv = new android.widget.TextView(ChatbotActivity.this);
-                                tv.setText("🔍 " + sug);
-                                tv.setTextColor(0xFFE0E0E0);
-                                tv.setTextSize(14);
-                                tv.setPadding(24, 16, 24, 16);
-                                tv.setOnClickListener(new android.view.View.OnClickListener() {
-                                    @Override
-                                    public void onClick(android.view.View v) {
-                                        inputField.setText(sug);
-                                        suggestionsContainer.setVisibility(android.view.View.GONE);
-                                        sendBtn.performClick();
-                                    }
-                                });
-                                suggestionsContainer.addView(tv);
-                            }
-                            suggestionsContainer.setVisibility(android.view.View.VISIBLE);
-                        }
-                    });
-
-                } catch (Exception e) {}
-            }
-        }).start();
-    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def detect_language(text):
+    text = normalize_text(text)
+
+    if re.search(r"[\u0600-\u06ff]", text):
+        return "fa"
+
+    if re.search(r"[\u0400-\u04ff]", text):
+        return "ru"
+
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "zh"
+
+    if re.search(r"[\u3040-\u30ff]", text):
+        return "ja"
+
+    return "en"
+
+
+# ============================================================
+# START
+# ============================================================
+
+START_TEXT = f"""𝕳𝖅𝕽𝟏⁹
+
+The HZR AI says hello to you.
+
+How can I help you today?
+
+Type help or کمک for assistance.
+
+{HZR_TAG}"""
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(START_TEXT)
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+HELP_EN = f"""𝕳𝖅𝕽𝟏⁹
+
+HZR AI can search for information and help you explore different topics.
+
+You can ask questions such as:
+
+What is Afghanistan?
+Tell me about Barcelona
+Who is Messi?
+Where is Kabul?
+When did World War II begin?
+Why is the sky blue?
+Calculate 25 × 4
+
+You can also send only a topic:
+
+Afghanistan
+Barcelona
+Lionel Messi
+Python
+Space
+
+When several results are available, HZR will show search suggestions.
+
+Commands:
+
+/start
+/help
+/status
+
+You can also type:
+
+کمک
+
+{HZR_TAG}"""
+
+
+HELP_FA = f"""𝕳𝖅𝕽𝟏⁹
+
+HZR AI می‌تواند درباره موضوعات مختلف اطلاعات پیدا کند و به پرسش‌های شما پاسخ دهد.
+
+می‌توانی سؤال‌هایی مثل این بپرسی:
+
+افغانستان چیست؟
+درباره افغانستان بگو
+پایتخت افغانستان چیست؟
+مسی کیست؟
+بارسلونا کجاست؟
+جنگ جهانی دوم چه زمانی آغاز شد؟
+چرا آسمان آبی است؟
+25 × 4
+
+همچنین می‌توانی فقط نام موضوع را بفرستی:
+
+افغانستان
+بارسلونا
+لیونل مسی
+پایتون
+فضا
+
+اگر چند نتیجه وجود داشته باشد، HZR پیشنهادهای جستجو را نشان می‌دهد.
+
+دستورها:
+
+/start
+/help
+/status
+
+برای راهنما همچنین می‌توانی بنویسی:
+
+کمک
+
+{HZR_TAG}"""
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    language = detect_language(update.message.text or "")
+
+    if language == "fa":
+        await update.message.reply_text(HELP_FA)
+    else:
+        await update.message.reply_text(HELP_EN)
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"""𝕳𝖅𝕽𝟏⁹
+
+Status: Online
+Mode: Webhook
+Search: Wikipedia
+Memory: Active
+
+{HZR_TAG}"""
+    )
+
+
+# ============================================================
+# GREETINGS
+# ============================================================
+
+GREETINGS = {
+    "hi": "Hello. How can I help you today?",
+    "hello": "Hello. How can I help you today?",
+    "hey": "Hey. What would you like to know?",
+    "سلام": "سلام. HZR آماده است. چه کمکی می‌توانم بکنم؟",
+    "درود": "درود. چه چیزی می‌خواهی بدانید؟",
+    "مرحبا": "مرحباً. كيف يمكنني مساعدتك؟",
+    "اهلا": "أهلاً. كيف يمكنني مساعدتك؟",
+    "hola": "Hola. ¿Cómo puedo ayudarte?",
+    "bonjour": "Bonjour. Comment puis-je vous aider ?",
+    "hallo": "Hallo. Wie kann ich dir helfen?",
+    "ciao": "Ciao. Come posso aiutarti?",
+    "привет": "Привет. Чем я могу помочь?",
+    "你好": "你好。有什么可以帮助你的吗？",
+    "こんにちは": "こんにちは。何をお手伝いできますか？",
 }
 
-final UIController controller = new UIController();
-controller.renderHistoryList("");
 
-searchHistoryField.addTextChangedListener(new android.text.TextWatcher() {
-    @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-    @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
-        controller.renderHistoryList(s.toString());
-    }
-    @Override public void afterTextChanged(android.text.Editable s) {}
-});
+def get_greeting(text):
+    value = normalize_text(text).casefold()
+    return GREETINGS.get(value)
 
-inputField.addTextChangedListener(new android.text.TextWatcher() {
-    @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-    @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
-        controller.fetchSuggestions(s.toString());
-    }
-    @Override public void afterTextChanged(android.text.Editable s) {}
-});
 
-startNewBtn.setOnClickListener(new android.view.View.OnClickListener() {
-    @Override
-    public void onClick(android.view.View v) {
-        controller.openChat(String.valueOf(System.currentTimeMillis()));
-    }
-});
+# ============================================================
+# CALCULATOR
+# ============================================================
 
-backBtn.setOnClickListener(new android.view.View.OnClickListener() {
-    @Override
-    public void onClick(android.view.View v) {
-        chatPage.setVisibility(android.view.View.GONE);
-        listPage.setVisibility(android.view.View.VISIBLE);
-        controller.renderHistoryList("");
-    }
-});
+OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
 
-sendBtn.setOnClickListener(new android.view.View.OnClickListener() {
-    @Override
-    public void onClick(android.view.View v) {
-        if (isAnimating[0]) {
-            cancelRequested[0] = true;
-            return;
-        }
 
-        suggestionsContainer.setVisibility(android.view.View.GONE);
-        final String userText = inputField.getText().toString().trim();
+def calculate_node(node):
 
-        if (userText.isEmpty()) {
-            android.widget.Toast.makeText(ChatbotActivity.this, "لطفاً متن یا موضوعی بنویسید", android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            if abs(node.value) > 10**12:
+                raise ValueError
+            return node.value
+        raise ValueError
 
-        final boolean isRTL = controller.isRTL(userText);
-        controller.addBubble((isRTL ? "شما:\n" : "You:\n") + userText, null, null, true, true, true);
-        inputField.setText("");
+    if isinstance(node, ast.UnaryOp):
+        operation = OPERATORS.get(type(node.op))
 
-        final android.widget.TextView loadingTv = new android.widget.TextView(ChatbotActivity.this);
-        loadingTv.setText(isRTL ? "Wikipedia Bot:\nدر حال جستجو..." : "Wikipedia Bot:\nSearching...");
-        loadingTv.setTextSize(15);
-        loadingTv.setTextColor(0xFFAAAAAA);
-        loadingTv.setPadding(28, 20, 28, 20);
+        if not operation:
+            raise ValueError
 
-        android.graphics.drawable.GradientDrawable loadBg = new android.graphics.drawable.GradientDrawable();
-        loadBg.setColor(0xFF262626);
-        loadBg.setCornerRadius(24f);
-        loadingTv.setBackground(loadBg);
+        return operation(calculate_node(node.operand))
 
-        android.widget.LinearLayout.LayoutParams loadParams = new android.widget.LinearLayout.LayoutParams(
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-        loadParams.setMargins(0, 10, 60, 10);
-        loadingTv.setLayoutParams(loadParams);
-        messagesBox.addView(loadingTv);
+    if isinstance(node, ast.BinOp):
+        operation = OPERATORS.get(type(node.op))
 
-        chatScroll.post(new Runnable() {
-            @Override
-            public void run() {
-                chatScroll.fullScroll(android.view.View.FOCUS_DOWN);
+        if not operation:
+            raise ValueError
+
+        left = calculate_node(node.left)
+        right = calculate_node(node.right)
+
+        if isinstance(node.op, ast.Pow) and abs(right) > 10:
+            raise ValueError
+
+        result = operation(left, right)
+
+        if abs(result) > 10**12:
+            raise ValueError
+
+        return result
+
+    raise ValueError
+
+
+def safe_calculate(expression):
+
+    expression = expression.strip()
+
+    expression = expression.replace("×", "*")
+    expression = expression.replace("÷", "/")
+    expression = expression.replace("−", "-")
+    expression = expression.replace(",", "")
+
+    if not re.fullmatch(
+        r"[0-9+\-*/().%\s]+",
+        expression
+    ):
+        return None
+
+    try:
+        tree = ast.parse(
+            expression,
+            mode="eval"
+        )
+
+        return calculate_node(tree.body)
+
+    except Exception:
+        return None
+
+
+def looks_like_calculation(text):
+
+    text = text.strip()
+
+    if not re.fullmatch(
+        r"[0-9+\-*/×÷−().%\s]+",
+        text
+    ):
+        return False
+
+    return (
+        any(c.isdigit() for c in text)
+        and any(
+            c in text
+            for c in "+-*/×÷−%"
+        )
+    )
+
+
+def format_number(value):
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+
+    return str(round(value, 10))
+
+
+# ============================================================
+# HTTP SESSION
+# ============================================================
+
+async def get_session():
+
+    global HTTP_SESSION
+
+    if HTTP_SESSION is None:
+        HTTP_SESSION = aiohttp.ClientSession(
+            headers={
+                "User-Agent": "HZR19-AI-Telegram-Bot/1.0"
             }
-        });
+        )
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    String domain = controller.getDomain(userText);
-                    String encoded = java.net.URLEncoder.encode(userText, "UTF-8");
+    return HTTP_SESSION
 
-                    String urlString = "https://" + domain + "/w/api.php"
-                        + "?action=query"
-                        + "&prop=extracts|pageimages"
-                        + "&pithumbsize=600"
-                        + "&exintro=1"
-                        + "&explaintext=1"
-                        + "&format=json"
-                        + "&redirects=1"
-                        + "&titles=" + encoded;
 
-                    java.net.URL url = new java.net.URL(urlString);
-                    javax.net.ssl.HttpsURLConnection connection = (javax.net.ssl.HttpsURLConnection) url.openConnection();
-                    connection.setRequestMethod("GET");
-                    connection.setConnectTimeout(12000);
-                    connection.setReadTimeout(12000);
-                    connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36");
+# ============================================================
+# WIKIPEDIA SEARCH
+# ============================================================
 
-                    java.io.BufferedReader reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(connection.getInputStream(), "UTF-8"));
-                    StringBuilder response = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) response.append(line);
-                    reader.close();
-                    connection.disconnect();
+async def wikipedia_search(query, language="en", limit=6):
 
-                    org.json.JSONObject json = new org.json.JSONObject(response.toString());
-                    org.json.JSONObject pages = json.getJSONObject("query").getJSONObject("pages");
-                    java.util.Iterator<String> keys = pages.keys();
+    query = normalize_text(query)
 
-                    final String pageId = keys.next();
-                    org.json.JSONObject page = pages.getJSONObject(pageId);
+    if not query:
+        return []
 
-                    final String titleText = page.optString("title", "");
-                    final String extract = page.optString("extract", "");
+    session = await get_session()
 
-                    String imageUrlTemp = null;
-                    if (page.has("thumbnail")) {
-                        imageUrlTemp = page.getJSONObject("thumbnail").optString("source", null);
-                    }
-                    final String imageUrl = imageUrlTemp;
+    url = f"https://{language}.wikipedia.org/w/api.php"
 
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            messagesBox.removeView(loadingTv);
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "srlimit": limit,
+        "format": "json",
+        "utf8": 1,
+    }
 
-                            if (pageId.equals("-1") || extract.isEmpty()) {
-                                String notFoundMsg = isRTL
-                                    ? "Wikipedia Bot:\n\nمتأسفانه اطلاعاتی درباره این موضوع پیدا نشد."
-                                    : "Wikipedia Bot:\n\nSorry, no information was found on this topic.";
-                                controller.addBubble(notFoundMsg, null, null, false, true, true);
-                            } else {
-                                String botAnswer = "Wikipedia Bot:\n\n" + titleText + "\n\n" + extract;
-                                controller.addBubble(botAnswer, imageUrl, titleText, false, true, true);
-                            }
-                        }
-                    });
+    try:
 
-                } catch (Exception e) {
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            messagesBox.removeView(loadingTv);
-                            String errorMsg = isRTL
-                                ? "Wikipedia Bot:\n\nخطا در اتصال به اینترنت یا دریافت اطلاعات."
-                                : "Wikipedia Bot:\n\nNetwork error or failed to retrieve data.";
-                            controller.addBubble(errorMsg, null, null, false, true, true);
-                        }
-                    });
+        async with session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=12)
+        ) as response:
+
+            if response.status != 200:
+                return []
+
+            data = await response.json()
+
+            results = []
+
+            for item in data.get(
+                "query",
+                {}
+            ).get(
+                "search",
+                []
+            ):
+
+                title = item.get(
+                    "title",
+                    ""
+                ).strip()
+
+                if title:
+                    results.append(title)
+
+            return results
+
+    except Exception as error:
+
+        print(
+            "Wikipedia search error:",
+            error
+        )
+
+        return []
+
+
+# ============================================================
+# WIKIPEDIA PAGE
+# ============================================================
+
+async def wikipedia_page(title, language="en"):
+
+    session = await get_session()
+
+    url = f"https://{language}.wikipedia.org/w/api.php"
+
+    params = {
+        "action": "query",
+        "prop": "extracts|pageimages",
+        "explaintext": 1,
+        "exchars": 14000,
+        "titles": title,
+        "redirects": 1,
+        "format": "json",
+        "utf8": 1,
+        "pithumbsize": 900,
+    }
+
+    try:
+
+        async with session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as response:
+
+            if response.status != 200:
+                return None
+
+            data = await response.json()
+
+            pages = data.get(
+                "query",
+                {}
+            ).get(
+                "pages",
+                {}
+            )
+
+            for page in pages.values():
+
+                if "missing" in page:
+                    continue
+
+                return {
+                    "title": page.get(
+                        "title",
+                        title
+                    ),
+                    "extract": page.get(
+                        "extract",
+                        ""
+                    ).strip(),
+                    "image": page.get(
+                        "thumbnail",
+                        {}
+                    ).get(
+                        "source"
+                    ),
                 }
-            }
-        }).start();
-    }
-});
+
+    except Exception as error:
+
+        print(
+            "Wikipedia page error:",
+            error
+        )
+
+    return None
+
+
+# ============================================================
+# SUGGESTION BUTTONS
+# ============================================================
+
+def make_suggestion_keyboard(results):
+
+    rows = []
+
+    for title in results[:6]:
+
+        # Telegram callback data has a size limit,
+        # therefore keep the title short.
+        safe_title = title[:180]
+
+        rows.append([
+            InlineKeyboardButton(
+                f"🔎 {title}",
+                callback_data=f"wiki:{safe_title}"
+            )
+        ])
+
+    if not rows:
+        return None
+
+    return InlineKeyboardMarkup(rows)
+
+
+# ============================================================
+# SEARCH LANGUAGE
+# ============================================================
+
+async def search_in_best_language(
+    query,
+    language
+):
+
+    if language == "fa":
+
+        results = await wikipedia_search(
+            query,
+            "fa",
+            6
+        )
+
+        if results:
+            return results, "fa"
+
+        results = await wikipedia_search(
+            query,
+            "en",
+            6
+        )
+
+        return results, "en"
+
+    results = await wikipedia_search(
+        query,
+        "en",
+        6
+    )
+
+    return results, "en"
+
+
+# ============================================================
+# QUERY CLEANING
+# ============================================================
+
+def clean_query(text):
+
+    value = normalize_text(text)
+
+    patterns = [
+        r"^درباره\s+",
+        r"^در مورد\s+",
+        r"^what is\s+",
+        r"^who is\s+",
+        r"^where is\s+",
+        r"^when is\s+",
+        r"^tell me about\s+",
+        r"^information about\s+",
+        r"^info about\s+",
+        r"^about\s+",
+    ]
+
+    for pattern in patterns:
+
+        value = re.sub(
+            pattern,
+            "",
+            value,
+            flags=re.IGNORECASE
+        )
+
+    value = re.sub(
+        r"(چیست|کیست|کجاست|چه است|چی میدانی|چه میدانی)\s*\??$",
+        "",
+        value,
+        flags=re.IGNORECASE
+    )
+
+    return value.strip()
+
+
+# ============================================================
+# THINKING
+# ============================================================
+
+async def show_thinking(chat_id):
+
+    message = await APPLICATION.bot.send_message(
+        chat_id=chat_id,
+        text="𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂."
+    )
+
+    frames = [
+        "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂..",
+        "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂...",
+    ]
+
+    try:
+
+        for frame in frames:
+
+            await asyncio.sleep(0.35)
+
+            await message.edit_text(frame)
+
+    except Exception:
+        pass
+
+    return message
+
+
+# ============================================================
+# MESSAGE SPLITTER
+# ============================================================
+
+def split_message(text, limit=3900):
+
+    parts = []
+
+    while len(text) > limit:
+
+        cut = text.rfind(
+            "\n",
+            0,
+            limit
+        )
+
+        if cut < 1000:
+
+            cut = text.rfind(
+                " ",
+                0,
+                limit
+            )
+
+        if cut < 1000:
+            cut = limit
+
+        parts.append(
+            text[:cut].strip()
+        )
+
+        text = text[cut:].strip()
+
+    if text:
+        parts.append(text)
+
+    return parts
+
+
+# ============================================================
+# INFORMATION ANSWER
+# ============================================================
+
+def build_answer(
+    page,
+    language
+):
+
+    title = page.get(
+        "title",
+        "Unknown"
+    )
+
+    extract = page.get(
+        "extract",
+        ""
+    ).strip()
+
+    if not extract:
+        return None
+
+    # Long answer.
+    extract = extract[:12000]
+
+    if language == "fa":
+
+        header = (
+            "𝕳𝖅𝕽𝟏⁹\n\n"
+            f"موضوع: {title}\n\n"
+            "اطلاعات:\n\n"
+        )
+
+    else:
+
+        header = (
+            "𝕳𝖅𝕽𝟏⁹\n\n"
+            f"Topic: {title}\n\n"
+            "Information:\n\n"
+        )
+
+    return (
+        header
+        + extract
+        + f"\n\n{HZR_TAG}"
+    )
+
+
+# ============================================================
+# MAIN MESSAGE
+# ============================================================
+
+async def text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    text = update.message.text
+
+    if not text:
+        return
+
+    text = normalize_text(text)
+
+    if not text:
+        return
+
+    user_id = update.effective_user.id
+
+    lower = text.casefold()
+
+    # --------------------------------------------------------
+    # HELP
+    # --------------------------------------------------------
+
+    if lower in {
+        "help",
+        "کمک",
+        "/help"
+    }:
+
+        await help_command(
+            update,
+            context
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # GREETING
+    # --------------------------------------------------------
+
+    greeting = get_greeting(text)
+
+    if greeting:
+
+        await update.message.reply_text(
+            f"𝕳𝖅𝕽𝟏⁹\n\n"
+            f"{greeting}\n\n"
+            f"{HZR_TAG}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CALCULATOR
+    # --------------------------------------------------------
+
+    if looks_like_calculation(text):
+
+        result = safe_calculate(text)
+
+        if result is not None:
+
+            await update.message.reply_text(
+                f"𝕳𝖅𝕽𝟏⁹\n\n"
+                f"{text} = "
+                f"{format_number(result)}\n\n"
+                f"{HZR_TAG}"
+            )
+
+            return
+
+    # --------------------------------------------------------
+    # FOLLOW-UP QUESTION
+    # --------------------------------------------------------
+
+    previous_topic = get_last_topic(user_id)
+
+    follow_up_phrases = [
+        "پایتختش",
+        "پایتخت آن",
+        "پایتختش چیست",
+        "its capital",
+        "what is its capital",
+        "capital of it",
+        "where is it",
+    ]
+
+    if (
+        previous_topic
+        and any(
+            phrase in lower
+            for phrase in follow_up_phrases
+        )
+    ):
+
+        text = (
+            "capital of "
+            + previous_topic
+        )
+
+    # --------------------------------------------------------
+    # QUERY
+    # --------------------------------------------------------
+
+    query = clean_query(text)
+
+    if not query:
+        query = text
+
+    # --------------------------------------------------------
+    # THINKING
+    # --------------------------------------------------------
+
+    thinking = await show_thinking(
+        update.effective_chat.id
+    )
+
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
+
+    language = detect_language(text)
+
+    results, search_language = (
+        await search_in_best_language(
+            query,
+            language
+        )
+    )
+
+    # --------------------------------------------------------
+    # REMOVE THINKING
+    # --------------------------------------------------------
+
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # NO RESULTS
+    # --------------------------------------------------------
+
+    if not results:
+
+        await update.message.reply_text(
+            f"𝕳𝖅𝕽𝟏⁹\n\n"
+            f"I could not find reliable information for:\n\n"
+            f"{query}\n\n"
+            f"Try a more specific topic.\n\n"
+            f"{HZR_TAG}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # EXACT RESULT
+    # --------------------------------------------------------
+
+    exact = None
+
+    for title in results:
+
+        if title.casefold() == query.casefold():
+
+            exact = title
+            break
+
+    # --------------------------------------------------------
+    # MULTIPLE SUGGESTIONS
+    # --------------------------------------------------------
+
+    if (
+        exact is None
+        and len(results) > 1
+        and len(query) <= 50
+    ):
+
+        remember(
+            user_id,
+            query
+        )
+
+        keyboard = make_suggestion_keyboard(
+            results
+        )
+
+        await update.message.reply_text(
+            f"𝕳𝖅𝕽𝟏⁹\n\n"
+            f"Search suggestions for:\n"
+            f"「{query}」\n\n"
+            f"Choose a result:",
+            reply_markup=keyboard
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SELECT RESULT
+    # --------------------------------------------------------
+
+    title = exact or results[0]
+
+    page = await wikipedia_page(
+        title,
+        search_language
+    )
+
+    # English fallback.
+    if (
+        not page
+        and search_language != "en"
+    ):
+
+        page = await wikipedia_page(
+            title,
+            "en"
+        )
+
+    # --------------------------------------------------------
+    # PAGE FAILED
+    # --------------------------------------------------------
+
+    if not page:
+
+        await update.message.reply_text(
+            f"𝕳𝖅𝕽𝟏⁹\n\n"
+            f"I found the topic, but I could not "
+            f"load its detailed information.\n\n"
+            f"{HZR_TAG}"
+        )
+
+        return
+
+    remember(
+        user_id,
+        page["title"]
+    )
+
+    # --------------------------------------------------------
+    # IMAGE
+    # --------------------------------------------------------
+
+    image = page.get("image")
+
+    if image:
+
+        try:
+
+            await update.message.reply_photo(
+                photo=image
+            )
+
+        except Exception as error:
+
+            print(
+                "Image error:",
+                error
+            )
+
+    # --------------------------------------------------------
+    # ANSWER
+    # --------------------------------------------------------
+
+    answer = build_answer(
+        page,
+        language
+    )
+
+    if not answer:
+        return
+
+    # --------------------------------------------------------
+    # LONG ANSWER
+    # --------------------------------------------------------
+
+    for part in split_message(answer):
+
+        try:
+
+            await update.message.reply_text(
+                part
+            )
+
+        except Exception as error:
+
+            print(
+                "Message error:",
+                error
+            )
+
+            await update.message.reply_text(
+                part.replace(
+                    "<",
+                    ""
+                ).replace(
+                    ">",
+                    ""
+                )
+            )
+
+
+# ============================================================
+# SUGGESTION CALLBACK
+# ============================================================
+
+async def suggestion_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if not query:
+        return
+
+    await query.answer()
+
+    data = query.data or ""
+
+    if not data.startswith("wiki:"):
+        return
+
+    title = data[5:].strip()
+
+    if not title:
+        return
+
+    language = detect_language(
+        query.message.text or ""
+    )
+
+    search_language = (
+        "fa"
+        if language == "fa"
+        else "en"
+    )
+
+    thinking = await show_thinking(
+        query.message.chat.id
+    )
+
+    page = await wikipedia_page(
+        title,
+        search_language
+    )
+
+    if (
+        not page
+        and search_language != "en"
+    ):
+
+        page = await wikipedia_page(
+            title,
+            "en"
+        )
+
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    if not page:
+
+        await query.message.reply_text(
+            f"𝕳𝖅𝕽𝟏⁹\n\n"
+            f"Information could not be loaded.\n\n"
+            f"{HZR_TAG}"
+        )
+
+        return
+
+    remember(
+        query.from_user.id,
+        page["title"]
+    )
+
+    image = page.get("image")
+
+    if image:
+
+        try:
+
+            await query.message.reply_photo(
+                photo=image
+            )
+
+        except Exception:
+            pass
+
+    answer = build_answer(
+        page,
+        language
+    )
+
+    if answer:
+
+        for part in split_message(answer):
+
+            await query.message.reply_text(
+                part
+            )
+
+
+# ============================================================
+# WEBHOOK
+# ============================================================
+
+async def webhook_handler(request):
+
+    secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token"
+    )
+
+    if secret != WEBHOOK_SECRET:
+
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
+
+    try:
+
+        data = await request.json()
+
+    except Exception:
+
+        return web.Response(
+            status=400,
+            text="Invalid JSON"
+        )
+
+    try:
+
+        update = Update.de_json(
+            data,
+            APPLICATION.bot
+        )
+
+        await APPLICATION.update_queue.put(
+            update
+        )
+
+    except Exception as error:
+
+        print(
+            "Webhook error:",
+            error
+        )
+
+        return web.Response(
+            status=500,
+            text="Webhook error"
+        )
+
+    return web.Response(
+        status=200,
+        text="OK"
+    )
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+async def root_handler(request):
+
+    return web.Response(
+        text="𝕳𝖅𝕽𝟏⁹ AI Telegram Bot is online."
+    )
+
+
+async def health_handler(request):
+
+    return web.json_response({
+        "success": True,
+        "service": "HZR19 AI Telegram Bot",
+        "status": "online",
+        "mode": "webhook"
+    })
+
+
+# ============================================================
+# START SERVER
+# ============================================================
+
+async def start_server():
+
+    global APPLICATION
+
+    APPLICATION = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # Commands
+    APPLICATION.add_handler(
+        CommandHandler(
+            "start",
+            start_command
+        )
+    )
+
+    APPLICATION.add_handler(
+        CommandHandler(
+            "help",
+            help_command
+        )
+    )
+
+    APPLICATION.add_handler(
+        CommandHandler(
+            "status",
+            status_command
+        )
+    )
+
+    # Suggestion buttons
+    APPLICATION.add_handler(
+        CallbackQueryHandler(
+            suggestion_callback,
+            pattern=r"^wiki:"
+        )
+    )
+
+    # Normal messages
+    APPLICATION.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            text_handler
+        )
+    )
+
+    # Initialize Telegram application
+    await APPLICATION.initialize()
+    await APPLICATION.start()
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL
+        + WEBHOOK_PATH
+    )
+
+    await APPLICATION.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=False
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "𝕳𝖅𝕽𝟏⁹ AI TELEGRAM BOT"
+    )
+
+    print(
+        "MODE: WEBHOOK"
+    )
+
+    print(
+        "WEBHOOK:",
+        webhook_url
+    )
+
+    print(
+        "STATUS: ONLINE"
+    )
+
+    print(
+        "======================================"
+    )
+
+    # Web server
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        root_handler
+    )
+
+    app.router.add_get(
+        "/health",
+        health_handler
+    )
+
+    app.router.add_get(
+        "/api/status",
+        health_handler
+    )
+
+    app.router.add_post(
+        WEBHOOK_PATH,
+        webhook_handler
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        PORT
+    )
+
+    await site.start()
+
+    print(
+        f"HTTP server running on port {PORT}"
+    )
+
+    try:
+
+        await asyncio.Event().wait()
+
+    finally:
+
+        print(
+            "Shutting down HZR19..."
+        )
+
+        try:
+            await APPLICATION.bot.delete_webhook()
+        except Exception:
+            pass
+
+        await runner.cleanup()
+
+        await APPLICATION.stop()
+        await APPLICATION.shutdown()
+
+        global HTTP_SESSION
+
+        if HTTP_SESSION:
+
+            await HTTP_SESSION.close()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        asyncio.run(
+            start_server()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "HZR19 stopped."
+)
