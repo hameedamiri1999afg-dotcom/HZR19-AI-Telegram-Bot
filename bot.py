@@ -1,10 +1,8 @@
 import os
 import re
-import ast
-import operator
-import hashlib
 import asyncio
-from collections import defaultdict, deque
+import hashlib
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -25,94 +23,31 @@ from telegram.ext import (
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 PORT = int(os.getenv("PORT", "10000"))
-
 RENDER_EXTERNAL_URL = os.getenv(
     "RENDER_EXTERNAL_URL",
     "https://hzr19-ai-telegram-bot.onrender.com"
-).rstrip("/")
+)
 
 WEBHOOK_PATH = "/telegram/webhook"
+WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
 
-HZR_TAG = "@m19_goat"
+BRAND = "𝕳𝖅𝕽𝟏⁹"
+FOOTER = "@m19_goat"
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing.")
+# Short temporary storage for search results.
+# It prevents Telegram callback_data from becoming too long.
+SEARCH_RESULTS = {}
 
-WEBHOOK_SECRET = hashlib.sha256(
-    BOT_TOKEN.encode("utf-8")
-).hexdigest()[:32]
-
-APPLICATION = None
-HTTP_SESSION = None
-
-
-# ============================================================
-# MEMORY
-# ============================================================
-
-USER_MEMORY = defaultdict(lambda: deque(maxlen=8))
-
-
-def remember(user_id, topic):
-    if topic:
-        USER_MEMORY[user_id].append(topic)
-
-
-def get_last_topic(user_id):
-    if USER_MEMORY[user_id]:
-        return USER_MEMORY[user_id][-1]
-    return None
+# Short conversation memory.
+LAST_TOPIC = {}
 
 
 # ============================================================
-# TEXT
+# BASIC TEXT
 # ============================================================
 
-def normalize_text(text):
-    if not text:
-        return ""
-
-    text = text.strip()
-
-    replacements = {
-        "ي": "ی",
-        "ى": "ی",
-        "ك": "ک",
-        "ۀ": "ه",
-        "ة": "ه",
-    }
-
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def detect_language(text):
-    text = normalize_text(text)
-
-    if re.search(r"[\u0600-\u06ff]", text):
-        return "fa"
-
-    if re.search(r"[\u0400-\u04ff]", text):
-        return "ru"
-
-    if re.search(r"[\u4e00-\u9fff]", text):
-        return "zh"
-
-    if re.search(r"[\u3040-\u30ff]", text):
-        return "ja"
-
-    return "en"
-
-
-# ============================================================
-# START
-# ============================================================
-
-START_TEXT = f"""𝕳𝖅𝕽𝟏⁹
+START_TEXT = f"""{BRAND}
 
 The HZR AI says hello to you.
 
@@ -120,957 +55,639 @@ How can I help you today?
 
 Type help or کمک for assistance.
 
-{HZR_TAG}"""
+{FOOTER}"""
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(START_TEXT)
+HELP_TEXT = f"""{BRAND}
 
+راهنمای HZR AI
 
-# ============================================================
-# HELP
-# ============================================================
+می‌توانی تقریباً درباره هر موضوع عمومی سؤال بپرسی.
 
-HELP_EN = f"""𝕳𝖅𝕽𝟏⁹
+نمونه‌ها:
 
-HZR AI can search for information and help you explore different topics.
+• مسی
+• درباره مسی بگو
+• لیونل مسی کیست؟
+• افغانستان
+• پایتخت افغانستان چیست؟
+• درباره بارسلونا بگو
+• What is Messi?
+• Who is Lionel Messi?
+• Tell me about Afghanistan
+• Where is Afghanistan?
 
-You can ask questions such as:
+همچنین می‌توانی سؤال‌های What / Who / Where / When / Why / How را بپرسی.
 
-What is Afghanistan?
-Tell me about Barcelona
-Who is Messi?
-Where is Kabul?
-When did World War II begin?
-Why is the sky blue?
-Calculate 25 × 4
+محاسبات ساده نیز پشتیبانی می‌شوند:
 
-You can also send only a topic:
+25 * 4
+100 / 5 + 7
 
-Afghanistan
-Barcelona
-Lionel Messi
-Python
-Space
-
-When several results are available, HZR will show search suggestions.
-
-Commands:
-
-/start
-/help
-/status
-
-You can also type:
-
-کمک
-
-{HZR_TAG}"""
-
-
-HELP_FA = f"""𝕳𝖅𝕽𝟏⁹
-
-HZR AI می‌تواند درباره موضوعات مختلف اطلاعات پیدا کند و به پرسش‌های شما پاسخ دهد.
-
-می‌توانی سؤال‌هایی مثل این بپرسی:
-
-افغانستان چیست؟
-درباره افغانستان بگو
-پایتخت افغانستان چیست؟
-مسی کیست؟
-بارسلونا کجاست؟
-جنگ جهانی دوم چه زمانی آغاز شد؟
-چرا آسمان آبی است؟
-25 × 4
-
-همچنین می‌توانی فقط نام موضوع را بفرستی:
-
-افغانستان
-بارسلونا
-لیونل مسی
-پایتون
-فضا
-
-اگر چند نتیجه وجود داشته باشد، HZR پیشنهادهای جستجو را نشان می‌دهد.
-
-دستورها:
-
-/start
-/help
-/status
-
-برای راهنما همچنین می‌توانی بنویسی:
-
-کمک
-
-{HZR_TAG}"""
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    language = detect_language(update.message.text or "")
-
-    if language == "fa":
-        await update.message.reply_text(HELP_FA)
-    else:
-        await update.message.reply_text(HELP_EN)
+{FOOTER}"""
 
 
 # ============================================================
-# STATUS
+# LANGUAGE DETECTION
 # ============================================================
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"""𝕳𝖅𝕽𝟏⁹
+def contains_persian(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text))
 
-Status: Online
-Mode: Webhook
-Search: Wikipedia
-Memory: Active
 
-{HZR_TAG}"""
-    )
+def contains_cyrillic(text: str) -> bool:
+    return bool(re.search(r"[\u0400-\u04FF]", text))
 
 
-# ============================================================
-# GREETINGS
-# ============================================================
+def contains_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u4E00-\u9FFF]", text))
 
-GREETINGS = {
-    "hi": "Hello. How can I help you today?",
-    "hello": "Hello. How can I help you today?",
-    "hey": "Hey. What would you like to know?",
-    "سلام": "سلام. HZR آماده است. چه کمکی می‌توانم بکنم؟",
-    "درود": "درود. چه چیزی می‌خواهی بدانید؟",
-    "مرحبا": "مرحباً. كيف يمكنني مساعدتك؟",
-    "اهلا": "أهلاً. كيف يمكنني مساعدتك؟",
-    "hola": "Hola. ¿Cómo puedo ayudarte?",
-    "bonjour": "Bonjour. Comment puis-je vous aider ?",
-    "hallo": "Hallo. Wie kann ich dir helfen?",
-    "ciao": "Ciao. Come posso aiutarti?",
-    "привет": "Привет. Чем я могу помочь?",
-    "你好": "你好。有什么可以帮助你的吗？",
-    "こんにちは": "こんにちは。何をお手伝いできますか？",
-}
 
+def contains_japanese(text: str) -> bool:
+    return bool(re.search(r"[\u3040-\u30FF]", text))
 
-def get_greeting(text):
-    value = normalize_text(text).casefold()
-    return GREETINGS.get(value)
 
+def contains_korean(text: str) -> bool:
+    return bool(re.search(r"[\uAC00-\uD7AF]", text))
 
-# ============================================================
-# CALCULATOR
-# ============================================================
 
-OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-}
+def detect_language(text: str) -> str:
+    """
+    Best-effort language detection from script.
+    """
+    if contains_persian(text):
+        return "fa"
 
+    if contains_cyrillic(text):
+        return "ru"
 
-def calculate_node(node):
+    if contains_chinese(text):
+        return "zh"
 
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, (int, float)):
-            if abs(node.value) > 10**12:
-                raise ValueError
-            return node.value
-        raise ValueError
+    if contains_japanese(text):
+        return "ja"
 
-    if isinstance(node, ast.UnaryOp):
-        operation = OPERATORS.get(type(node.op))
+    if contains_korean(text):
+        return "ko"
 
-        if not operation:
-            raise ValueError
-
-        return operation(calculate_node(node.operand))
-
-    if isinstance(node, ast.BinOp):
-        operation = OPERATORS.get(type(node.op))
-
-        if not operation:
-            raise ValueError
-
-        left = calculate_node(node.left)
-        right = calculate_node(node.right)
-
-        if isinstance(node.op, ast.Pow) and abs(right) > 10:
-            raise ValueError
-
-        result = operation(left, right)
-
-        if abs(result) > 10**12:
-            raise ValueError
-
-        return result
-
-    raise ValueError
-
-
-def safe_calculate(expression):
-
-    expression = expression.strip()
-
-    expression = expression.replace("×", "*")
-    expression = expression.replace("÷", "/")
-    expression = expression.replace("−", "-")
-    expression = expression.replace(",", "")
-
-    if not re.fullmatch(
-        r"[0-9+\-*/().%\s]+",
-        expression
-    ):
-        return None
-
-    try:
-        tree = ast.parse(
-            expression,
-            mode="eval"
-        )
-
-        return calculate_node(tree.body)
-
-    except Exception:
-        return None
-
-
-def looks_like_calculation(text):
-
-    text = text.strip()
-
-    if not re.fullmatch(
-        r"[0-9+\-*/×÷−().%\s]+",
-        text
-    ):
-        return False
-
-    return (
-        any(c.isdigit() for c in text)
-        and any(
-            c in text
-            for c in "+-*/×÷−%"
-        )
-    )
-
-
-def format_number(value):
-
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-
-    return str(round(value, 10))
-
-
-# ============================================================
-# HTTP SESSION
-# ============================================================
-
-async def get_session():
-
-    global HTTP_SESSION
-
-    if HTTP_SESSION is None:
-        HTTP_SESSION = aiohttp.ClientSession(
-            headers={
-                "User-Agent": "HZR19-AI-Telegram-Bot/1.0"
-            }
-        )
-
-    return HTTP_SESSION
-
-
-# ============================================================
-# WIKIPEDIA SEARCH
-# ============================================================
-
-async def wikipedia_search(query, language="en", limit=6):
-
-    query = normalize_text(query)
-
-    if not query:
-        return []
-
-    session = await get_session()
-
-    url = f"https://{language}.wikipedia.org/w/api.php"
-
-    params = {
-        "action": "query",
-        "list": "search",
-        "srsearch": query,
-        "srlimit": limit,
-        "format": "json",
-        "utf8": 1,
-    }
-
-    try:
-
-        async with session.get(
-            url,
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=12)
-        ) as response:
-
-            if response.status != 200:
-                return []
-
-            data = await response.json()
-
-            results = []
-
-            for item in data.get(
-                "query",
-                {}
-            ).get(
-                "search",
-                []
-            ):
-
-                title = item.get(
-                    "title",
-                    ""
-                ).strip()
-
-                if title:
-                    results.append(title)
-
-            return results
-
-    except Exception as error:
-
-        print(
-            "Wikipedia search error:",
-            error
-        )
-
-        return []
-
-
-# ============================================================
-# WIKIPEDIA PAGE
-# ============================================================
-
-async def wikipedia_page(title, language="en"):
-
-    session = await get_session()
-
-    url = f"https://{language}.wikipedia.org/w/api.php"
-
-    params = {
-        "action": "query",
-        "prop": "extracts|pageimages",
-        "explaintext": 1,
-        "exchars": 14000,
-        "titles": title,
-        "redirects": 1,
-        "format": "json",
-        "utf8": 1,
-        "pithumbsize": 900,
-    }
-
-    try:
-
-        async with session.get(
-            url,
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as response:
-
-            if response.status != 200:
-                return None
-
-            data = await response.json()
-
-            pages = data.get(
-                "query",
-                {}
-            ).get(
-                "pages",
-                {}
-            )
-
-            for page in pages.values():
-
-                if "missing" in page:
-                    continue
-
-                return {
-                    "title": page.get(
-                        "title",
-                        title
-                    ),
-                    "extract": page.get(
-                        "extract",
-                        ""
-                    ).strip(),
-                    "image": page.get(
-                        "thumbnail",
-                        {}
-                    ).get(
-                        "source"
-                    ),
-                }
-
-    except Exception as error:
-
-        print(
-            "Wikipedia page error:",
-            error
-        )
-
-    return None
-
-
-# ============================================================
-# SUGGESTION BUTTONS
-# ============================================================
-
-def make_suggestion_keyboard(results):
-
-    rows = []
-
-    for title in results[:6]:
-
-        # Telegram callback data has a size limit,
-        # therefore keep the title short.
-        safe_title = title[:180]
-
-        rows.append([
-            InlineKeyboardButton(
-                f"🔎 {title}",
-                callback_data=f"wiki:{safe_title}"
-            )
-        ])
-
-    if not rows:
-        return None
-
-    return InlineKeyboardMarkup(rows)
-
-
-# ============================================================
-# SEARCH LANGUAGE
-# ============================================================
-
-async def search_in_best_language(
-    query,
-    language
-):
-
-    if language == "fa":
-
-        results = await wikipedia_search(
-            query,
-            "fa",
-            6
-        )
-
-        if results:
-            return results, "fa"
-
-        results = await wikipedia_search(
-            query,
-            "en",
-            6
-        )
-
-        return results, "en"
-
-    results = await wikipedia_search(
-        query,
-        "en",
-        6
-    )
-
-    return results, "en"
+    # Latin-script languages cannot always be detected reliably.
+    # English is used as the safest fallback.
+    return "en"
 
 
 # ============================================================
 # QUERY CLEANING
 # ============================================================
 
-def clean_query(text):
+def clean_query(text: str) -> str:
+    text = text.strip()
 
-    value = normalize_text(text)
-
-    patterns = [
-        r"^درباره\s+",
-        r"^در مورد\s+",
-        r"^what is\s+",
-        r"^who is\s+",
-        r"^where is\s+",
-        r"^when is\s+",
-        r"^tell me about\s+",
-        r"^information about\s+",
-        r"^info about\s+",
-        r"^about\s+",
+    prefixes = [
+        "درباره",
+        "در مورد",
+        "راجع به",
+        "معلومات درباره",
+        "معلومات در مورد",
+        "برای من درباره",
+        "برای من در مورد",
+        "tell me about",
+        "tell me everything about",
+        "what is",
+        "what's",
+        "who is",
+        "who's",
+        "where is",
+        "when was",
+        "when is",
+        "why is",
+        "how is",
+        "how was",
+        "how old is",
+        "information about",
+        "info about",
+        "about",
     ]
 
-    for pattern in patterns:
+    lower = text.lower()
 
-        value = re.sub(
-            pattern,
-            "",
-            value,
-            flags=re.IGNORECASE
-        )
+    for prefix in prefixes:
+        if lower.startswith(prefix.lower() + " "):
+            text = text[len(prefix):].strip()
+            break
 
-    value = re.sub(
-        r"(چیست|کیست|کجاست|چه است|چی میدانی|چه میدانی)\s*\??$",
+    text = re.sub(
+        r"^(کیست|چیست|چیه|کیه|کجاست|چه زمانی|چه وقت)\s*[\؟?]?$",
         "",
-        value,
-        flags=re.IGNORECASE
-    )
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
 
-    return value.strip()
+    text = re.sub(r"[؟?!]+$", "", text).strip()
+
+    return text
 
 
 # ============================================================
-# THINKING
+# SAFE CALCULATOR
 # ============================================================
 
-async def show_thinking(chat_id):
+def calculate(expression: str):
+    expr = expression.strip()
 
-    message = await APPLICATION.bot.send_message(
-        chat_id=chat_id,
-        text="𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂."
+    if len(expr) > 100:
+        return None
+
+    if not re.fullmatch(r"[0-9+\-*/().%\s×÷]+", expr):
+        return None
+
+    expr = (
+        expr.replace("×", "*")
+        .replace("÷", "/")
+        .replace("−", "-")
     )
 
+    if not re.search(r"[+\-*/%]", expr):
+        return None
+
+    try:
+        # Restricted arithmetic only.
+        result = eval(expr, {"__builtins__": {}}, {})
+
+        if isinstance(result, (int, float)):
+            if abs(result) > 10**100:
+                return None
+
+            if isinstance(result, float):
+                if result.is_integer():
+                    result = int(result)
+                else:
+                    result = round(result, 10)
+
+            return result
+
+    except Exception:
+        return None
+
+    return None
+
+
+# ============================================================
+# WIKIPEDIA
+# ============================================================
+
+async def wiki_request(language: str, params: dict):
+    url = f"https://{language}.wikipedia.org/w/api.php"
+
+    params = {
+        **params,
+        "format": "json",
+        "formatversion": "2",
+        "utf8": "1",
+    }
+
+    timeout = aiohttp.ClientTimeout(total=15)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    return None
+
+                return await response.json()
+
+    except Exception:
+        return None
+
+
+async def wiki_search(language: str, query: str, limit: int = 6):
+    data = await wiki_request(
+        language,
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": limit,
+            "srprop": "snippet|titlesnippet",
+        },
+    )
+
+    if not data:
+        return []
+
+    return data.get("query", {}).get("search", [])
+
+
+async def wiki_page(language: str, title: str):
+    data = await wiki_request(
+        language,
+        {
+            "action": "query",
+            "prop": "extracts|pageimages|langlinks|info",
+            "explaintext": "1",
+            "exsectionformat": "plain",
+            "exchars": "15000",
+            "piprop": "original",
+            "inprop": "url",
+            "lllang": "fa",
+            "lllimit": "1",
+            "titles": title,
+        },
+    )
+
+    if not data:
+        return None
+
+    pages = data.get("query", {}).get("pages", [])
+
+    if not pages:
+        return None
+
+    page = pages[0]
+
+    if page.get("missing"):
+        return None
+
+    return page
+
+
+async def get_best_wikipedia_result(query: str):
+    """
+    Search order:
+    1. Persian
+    2. User's detected language
+    3. English
+    4. Several additional languages
+    """
+
+    detected = detect_language(query)
+
+    languages = []
+
+    for lang in [
+        "fa",
+        detected,
+        "en",
+        "ps",
+        "ar",
+        "ur",
+        "tr",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pt",
+        "ru",
+        "hi",
+        "id",
+    ]:
+        if lang not in languages:
+            languages.append(lang)
+
+    for language in languages:
+        results = await wiki_search(language, query, limit=6)
+
+        if results:
+            return language, results
+
+    return None, []
+
+
+# ============================================================
+# PERSIAN PAGE REDIRECT
+# ============================================================
+
+async def get_persian_version(original_language: str, page: dict):
+    """
+    If the original page has a Persian language link,
+    use the Persian Wikipedia page.
+    """
+
+    if original_language == "fa":
+        return page
+
+    langlinks = page.get("langlinks", [])
+
+    if not langlinks:
+        return page
+
+    persian_title = None
+
+    for link in langlinks:
+        if link.get("lang") == "fa":
+            persian_title = link.get("title")
+            break
+
+    if not persian_title:
+        return page
+
+    persian_page = await wiki_page("fa", persian_title)
+
+    if persian_page:
+        return persian_page
+
+    return page
+
+
+# ============================================================
+# SEARCH BUTTON STORAGE
+# ============================================================
+
+def make_result_id(chat_id: int, title: str) -> str:
+    raw = f"{chat_id}:{title}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def store_result(chat_id: int, title: str):
+    result_id = make_result_id(chat_id, title)
+
+    SEARCH_RESULTS[result_id] = {
+        "chat_id": chat_id,
+        "title": title,
+    }
+
+    # Keep memory under control.
+    if len(SEARCH_RESULTS) > 1000:
+        oldest = next(iter(SEARCH_RESULTS))
+        SEARCH_RESULTS.pop(oldest, None)
+
+    return result_id
+
+
+# ============================================================
+# THINKING MESSAGE
+# ============================================================
+
+async def thinking_animation(message):
     frames = [
+        "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂.",
         "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂..",
         "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂...",
     ]
 
-    try:
-
-        for frame in frames:
-
-            await asyncio.sleep(0.35)
-
+    for frame in frames:
+        try:
             await message.edit_text(frame)
-
-    except Exception:
-        pass
-
-    return message
-
-
-# ============================================================
-# MESSAGE SPLITTER
-# ============================================================
-
-def split_message(text, limit=3900):
-
-    parts = []
-
-    while len(text) > limit:
-
-        cut = text.rfind(
-            "\n",
-            0,
-            limit
-        )
-
-        if cut < 1000:
-
-            cut = text.rfind(
-                " ",
-                0,
-                limit
-            )
-
-        if cut < 1000:
-            cut = limit
-
-        parts.append(
-            text[:cut].strip()
-        )
-
-        text = text[cut:].strip()
-
-    if text:
-        parts.append(text)
-
-    return parts
-
-
-# ============================================================
-# INFORMATION ANSWER
-# ============================================================
-
-def build_answer(
-    page,
-    language
-):
-
-    title = page.get(
-        "title",
-        "Unknown"
-    )
-
-    extract = page.get(
-        "extract",
-        ""
-    ).strip()
-
-    if not extract:
-        return None
-
-    # Long answer.
-    extract = extract[:12000]
-
-    if language == "fa":
-
-        header = (
-            "𝕳𝖅𝕽𝟏⁹\n\n"
-            f"موضوع: {title}\n\n"
-            "اطلاعات:\n\n"
-        )
-
-    else:
-
-        header = (
-            "𝕳𝖅𝕽𝟏⁹\n\n"
-            f"Topic: {title}\n\n"
-            "Information:\n\n"
-        )
-
-    return (
-        header
-        + extract
-        + f"\n\n{HZR_TAG}"
-    )
-
-
-# ============================================================
-# MAIN MESSAGE
-# ============================================================
-
-async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
-    text = update.message.text
-
-    if not text:
-        return
-
-    text = normalize_text(text)
-
-    if not text:
-        return
-
-    user_id = update.effective_user.id
-
-    lower = text.casefold()
-
-    # --------------------------------------------------------
-    # HELP
-    # --------------------------------------------------------
-
-    if lower in {
-        "help",
-        "کمک",
-        "/help"
-    }:
-
-        await help_command(
-            update,
-            context
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # GREETING
-    # --------------------------------------------------------
-
-    greeting = get_greeting(text)
-
-    if greeting:
-
-        await update.message.reply_text(
-            f"𝕳𝖅𝕽𝟏⁹\n\n"
-            f"{greeting}\n\n"
-            f"{HZR_TAG}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # CALCULATOR
-    # --------------------------------------------------------
-
-    if looks_like_calculation(text):
-
-        result = safe_calculate(text)
-
-        if result is not None:
-
-            await update.message.reply_text(
-                f"𝕳𝖅𝕽𝟏⁹\n\n"
-                f"{text} = "
-                f"{format_number(result)}\n\n"
-                f"{HZR_TAG}"
-            )
-
-            return
-
-    # --------------------------------------------------------
-    # FOLLOW-UP QUESTION
-    # --------------------------------------------------------
-
-    previous_topic = get_last_topic(user_id)
-
-    follow_up_phrases = [
-        "پایتختش",
-        "پایتخت آن",
-        "پایتختش چیست",
-        "its capital",
-        "what is its capital",
-        "capital of it",
-        "where is it",
-    ]
-
-    if (
-        previous_topic
-        and any(
-            phrase in lower
-            for phrase in follow_up_phrases
-        )
-    ):
-
-        text = (
-            "capital of "
-            + previous_topic
-        )
-
-    # --------------------------------------------------------
-    # QUERY
-    # --------------------------------------------------------
-
-    query = clean_query(text)
-
-    if not query:
-        query = text
-
-    # --------------------------------------------------------
-    # THINKING
-    # --------------------------------------------------------
-
-    thinking = await show_thinking(
-        update.effective_chat.id
-    )
-
-    # --------------------------------------------------------
-    # SEARCH
-    # --------------------------------------------------------
-
-    language = detect_language(text)
-
-    results, search_language = (
-        await search_in_best_language(
-            query,
-            language
-        )
-    )
-
-    # --------------------------------------------------------
-    # REMOVE THINKING
-    # --------------------------------------------------------
-
-    try:
-        await thinking.delete()
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # NO RESULTS
-    # --------------------------------------------------------
-
-    if not results:
-
-        await update.message.reply_text(
-            f"𝕳𝖅𝕽𝟏⁹\n\n"
-            f"I could not find reliable information for:\n\n"
-            f"{query}\n\n"
-            f"Try a more specific topic.\n\n"
-            f"{HZR_TAG}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # EXACT RESULT
-    # --------------------------------------------------------
-
-    exact = None
-
-    for title in results:
-
-        if title.casefold() == query.casefold():
-
-            exact = title
+            await asyncio.sleep(0.35)
+        except Exception:
             break
 
-    # --------------------------------------------------------
-    # MULTIPLE SUGGESTIONS
-    # --------------------------------------------------------
 
-    if (
-        exact is None
-        and len(results) > 1
-        and len(query) <= 50
-    ):
+# ============================================================
+# FORMAT WIKIPEDIA ANSWER
+# ============================================================
 
-        remember(
-            user_id,
-            query
+def clean_wiki_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    # Remove excessive blank lines.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text
+
+
+def split_text(text: str, max_length: int = 3900):
+    """
+    Telegram messages have a 4096-character limit.
+    Keep a safety margin for formatting.
+    """
+
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current = ""
+
+    paragraphs = text.split("\n\n")
+
+    for paragraph in paragraphs:
+        if len(current) + len(paragraph) + 2 <= max_length:
+            current += paragraph + "\n\n"
+        else:
+            if current.strip():
+                chunks.append(current.strip())
+
+            # Very long paragraph.
+            while len(paragraph) > max_length:
+                chunks.append(paragraph[:max_length])
+                paragraph = paragraph[max_length:]
+
+            current = paragraph + "\n\n"
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
+def build_header(title: str) -> str:
+    return f"{BRAND}\n\n📚 {title}\n\n"
+
+
+# ============================================================
+# SEARCH RESULT MESSAGE
+# ============================================================
+
+async def show_search_results(
+    update: Update,
+    results,
+    language: str,
+    query: str,
+):
+    message = update.effective_message
+    chat_id = update.effective_chat.id
+
+    buttons = []
+
+    for result in results[:6]:
+        title = result.get("title", "").strip()
+
+        if not title:
+            continue
+
+        result_id = store_result(chat_id, title)
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    title[:60],
+                    callback_data=f"wiki:{result_id}",
+                )
+            ]
         )
 
-        keyboard = make_suggestion_keyboard(
-            results
-        )
-
-        await update.message.reply_text(
-            f"𝕳𝖅𝕽𝟏⁹\n\n"
-            f"Search suggestions for:\n"
-            f"「{query}」\n\n"
-            f"Choose a result:",
-            reply_markup=keyboard
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # SELECT RESULT
-    # --------------------------------------------------------
-
-    title = exact or results[0]
-
-    page = await wikipedia_page(
-        title,
-        search_language
+    text = (
+        f"{BRAND}\n\n"
+        f"نتایج جست‌وجو برای:\n"
+        f"«{query}»\n\n"
+        f"یک موضوع را انتخاب کن:"
     )
 
-    # English fallback.
-    if (
-        not page
-        and search_language != "en"
-    ):
+    text += f"\n\n{FOOTER}"
 
-        page = await wikipedia_page(
-            title,
-            "en"
-        )
+    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
 
-    # --------------------------------------------------------
-    # PAGE FAILED
-    # --------------------------------------------------------
+    await message.edit_text(
+        text,
+        reply_markup=keyboard,
+    )
+
+
+# ============================================================
+# SEND WIKIPEDIA PAGE
+# ============================================================
+
+async def send_wikipedia_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    language: str,
+    title: str,
+    edit_message=None,
+):
+    chat_id = update.effective_chat.id
+
+    page = await wiki_page(language, title)
 
     if not page:
+        fallback_language = "en" if language != "en" else "fa"
 
-        await update.message.reply_text(
-            f"𝕳𝖅𝕽𝟏⁹\n\n"
-            f"I found the topic, but I could not "
-            f"load its detailed information.\n\n"
-            f"{HZR_TAG}"
+        if fallback_language != language:
+            page = await wiki_page(fallback_language, title)
+            language = fallback_language
+
+    if not page:
+        text = (
+            f"{BRAND}\n\n"
+            f"اطلاعات قابل اعتماد برای «{title}» پیدا نشد.\n\n"
+            f"موضوع دقیق‌تری را امتحان کن.\n\n"
+            f"{FOOTER}"
         )
 
+        if edit_message:
+            await edit_message.edit_text(text)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+
         return
 
-    remember(
-        user_id,
-        page["title"]
-    )
+    # Prefer Persian when available.
+    persian_page = await get_persian_version(language, page)
 
-    # --------------------------------------------------------
-    # IMAGE
-    # --------------------------------------------------------
+    if persian_page:
+        page = persian_page
 
-    image = page.get("image")
+    real_title = page.get("title", title)
+    extract = clean_wiki_text(page.get("extract", ""))
 
-    if image:
+    if not extract:
+        extract = "برای این موضوع متن کافی در ویکی‌پدیا پیدا نشد."
 
+    LAST_TOPIC[chat_id] = real_title
+
+    header = build_header(real_title)
+
+    full_text = header + extract + f"\n\n{FOOTER}"
+
+    chunks = split_text(full_text)
+
+    # First chunk replaces the existing thinking/search message.
+    if edit_message:
+        await edit_message.edit_text(chunks[0])
+        chunks = chunks[1:]
+
+    for chunk in chunks:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=chunk,
+        )
+
+    # Wikipedia image if available.
+    original = page.get("original")
+
+    if original and original.get("source"):
         try:
-
-            await update.message.reply_photo(
-                photo=image
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=original["source"],
             )
-
-        except Exception as error:
-
-            print(
-                "Image error:",
-                error
-            )
-
-    # --------------------------------------------------------
-    # ANSWER
-    # --------------------------------------------------------
-
-    answer = build_answer(
-        page,
-        language
-    )
-
-    if not answer:
-        return
-
-    # --------------------------------------------------------
-    # LONG ANSWER
-    # --------------------------------------------------------
-
-    for part in split_message(answer):
-
-        try:
-
-            await update.message.reply_text(
-                part
-            )
-
-        except Exception as error:
-
-            print(
-                "Message error:",
-                error
-            )
-
-            await update.message.reply_text(
-                part.replace(
-                    "<",
-                    ""
-                ).replace(
-                    ">",
-                    ""
-                )
-            )
+        except Exception:
+            pass
 
 
 # ============================================================
-# SUGGESTION CALLBACK
+# /START
 # ============================================================
 
-async def suggestion_callback(
+async def start_command(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+    await update.message.reply_text(START_TEXT)
 
+
+# ============================================================
+# /HELP
+# ============================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await update.message.reply_text(HELP_TEXT)
+
+
+# ============================================================
+# GREETINGS
+# ============================================================
+
+GREETING_WORDS = {
+    "hi",
+    "hello",
+    "hey",
+    "hola",
+    "bonjour",
+    "hallo",
+    "ciao",
+    "привет",
+    "سلام",
+    "سلام!",
+    "سلام؟",
+    "درود",
+    "هلو",
+    "مرحبا",
+    "أهلا",
+    "اهلا",
+    "olá",
+    "olá!",
+}
+
+
+def is_greeting(text: str) -> bool:
+    normalized = text.strip().lower()
+    normalized = re.sub(r"[!?.؟،,]+$", "", normalized)
+    return normalized in GREETING_WORDS
+
+
+async def send_greeting(message):
+    await message.reply_text(
+        f"{BRAND}\n\n"
+        f"سلام.\n"
+        f"چطور می‌توانم کمک کنم؟\n\n"
+        f"{FOOTER}"
+    )
+
+
+# ============================================================
+# CALLBACK BUTTONS
+# ============================================================
+
+async def callback_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
-
-    if not query:
-        return
 
     await query.answer()
 
@@ -1079,280 +696,314 @@ async def suggestion_callback(
     if not data.startswith("wiki:"):
         return
 
-    title = data[5:].strip()
+    result_id = data.split(":", 1)[1]
 
-    if not title:
+    result = SEARCH_RESULTS.get(result_id)
+
+    if not result:
+        await query.edit_message_text(
+            f"{BRAND}\n\n"
+            f"این نتیجه دیگر در حافظه موقت HZR موجود نیست.\n\n"
+            f"لطفاً دوباره جست‌وجو کن.\n\n"
+            f"{FOOTER}"
+        )
         return
 
-    language = detect_language(
-        query.message.text or ""
+    title = result["title"]
+
+    await query.edit_message_text(
+        "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂..."
     )
 
-    search_language = (
-        "fa"
-        if language == "fa"
-        else "en"
-    )
-
-    thinking = await show_thinking(
-        query.message.chat.id
-    )
-
-    page = await wikipedia_page(
+    await send_wikipedia_page(
+        update,
+        context,
+        "fa",
         title,
-        search_language
+        edit_message=query.message,
     )
 
-    if (
-        not page
-        and search_language != "en"
-    ):
 
-        page = await wikipedia_page(
-            title,
-            "en"
-        )
+# ============================================================
+# MAIN MESSAGE HANDLER
+# ============================================================
 
-    try:
-        await thinking.delete()
-    except Exception:
-        pass
-
-    if not page:
-
-        await query.message.reply_text(
-            f"𝕳𝖅𝕽𝟏⁹\n\n"
-            f"Information could not be loaded.\n\n"
-            f"{HZR_TAG}"
-        )
-
+async def message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.message or not update.message.text:
         return
 
-    remember(
-        query.from_user.id,
-        page["title"]
-    )
+    message = update.message
+    text = message.text.strip()
 
-    image = page.get("image")
+    if not text:
+        return
 
-    if image:
+    # Help in Persian.
+    if text.lower() in {
+        "کمک",
+        "help",
+        "راهنما",
+        "/کمک",
+    }:
+        await message.reply_text(HELP_TEXT)
+        return
 
-        try:
+    # Greetings.
+    if is_greeting(text):
+        await send_greeting(message)
+        return
 
-            await query.message.reply_photo(
-                photo=image
-            )
+    # Arithmetic.
+    result = calculate(text)
 
-        except Exception:
-            pass
-
-    answer = build_answer(
-        page,
-        language
-    )
-
-    if answer:
-
-        for part in split_message(answer):
-
-            await query.message.reply_text(
-                part
-            )
-
-
-# ============================================================
-# WEBHOOK
-# ============================================================
-
-async def webhook_handler(request):
-
-    secret = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token"
-    )
-
-    if secret != WEBHOOK_SECRET:
-
-        return web.Response(
-            status=403,
-            text="Forbidden"
+    if result is not None:
+        await message.reply_text(
+            f"{BRAND}\n\n"
+            f"نتیجه:\n"
+            f"{result}\n\n"
+            f"{FOOTER}"
         )
+        return
 
+    # Clean the user's question.
+    query = clean_query(text)
+
+    # If the user asks a follow-up such as:
+    # "پایتخت آن چیست؟"
+    # use the previous topic.
+    followup_patterns = [
+        "آن چیست",
+        "آن کجاست",
+        "پایتختش چیست",
+        "پایتخت آن",
+        "او کیست",
+        "این چیست",
+        "what is its",
+        "what is his",
+        "what is her",
+        "where is it",
+        "what is the capital",
+    ]
+
+    lower = text.lower()
+
+    if any(pattern in lower for pattern in followup_patterns):
+        previous = LAST_TOPIC.get(update.effective_chat.id)
+
+        if previous:
+            query = f"{previous} {query}"
+
+    # One message only: thinking message will become result.
+    thinking = await message.reply_text(
+        "𝙃𝙕𝙍 𝙄𝙎 𝙏𝙃𝙄𝙉𝙆𝙄𝙉𝙂."
+    )
+
+    await thinking_animation(thinking)
+
+    # Search Wikipedia.
+    language, results = await get_best_wikipedia_result(query)
+
+    if not results:
+        await thinking.edit_text(
+            f"{BRAND}\n\n"
+            f"اطلاعات قابل اعتماد برای:\n"
+            f"«{text}»\n\n"
+            f"پیدا نشد.\n\n"
+            f"موضوع دقیق‌تری را امتحان کن.\n\n"
+            f"{FOOTER}"
+        )
+        return
+
+    # Exact / strongest result.
+    first_title = results[0].get("title", "")
+
+    normalized_query = re.sub(
+        r"[^\w\u0600-\u06FF]+",
+        "",
+        query.lower(),
+    )
+
+    normalized_title = re.sub(
+        r"[^\w\u0600-\u06FF]+",
+        "",
+        first_title.lower(),
+    )
+
+    # If the first result clearly matches, directly show it.
+    if (
+        normalized_query
+        and (
+            normalized_query == normalized_title
+            or normalized_query in normalized_title
+            or normalized_title in normalized_query
+        )
+    ):
+        await send_wikipedia_page(
+            update,
+            context,
+            language,
+            first_title,
+            edit_message=thinking,
+        )
+        return
+
+    # For queries like "مسی", Wikipedia normally returns Messi as
+    # the strongest result. If the result is very strong, use it.
+    if len(results) == 1:
+        await send_wikipedia_page(
+            update,
+            context,
+            language,
+            first_title,
+            edit_message=thinking,
+        )
+        return
+
+    # Show suggestions in the SAME message.
+    # No separate suggestion message is created.
+    await show_search_results(
+        update,
+        results,
+        language,
+        text,
+    )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    print("HZR ERROR:", context.error)
+
+
+# ============================================================
+# HEALTH / STATUS
+# ============================================================
+
+async def health(request):
+    return web.json_response(
+        {
+            "success": True,
+            "service": "HZR19 AI Telegram Bot",
+            "status": "online",
+        }
+    )
+
+
+async def status(request):
+    return web.json_response(
+        {
+            "success": True,
+            "service": "HZR19 AI Telegram Bot",
+            "status": "online",
+            "mode": "webhook",
+            "search": "Wikipedia multilingual",
+        }
+    )
+
+
+# ============================================================
+# WEBHOOK SERVER
+# ============================================================
+
+async def telegram_webhook(request):
     try:
-
         data = await request.json()
-
-    except Exception:
-
-        return web.Response(
-            status=400,
-            text="Invalid JSON"
-        )
-
-    try:
 
         update = Update.de_json(
             data,
-            APPLICATION.bot
+            request.app["telegram_bot"],
         )
 
-        await APPLICATION.update_queue.put(
-            update
-        )
+        await request.app["telegram_app"].process_update(update)
+
+        return web.json_response({"ok": True})
 
     except Exception as error:
-
-        print(
-            "Webhook error:",
-            error
-        )
-
-        return web.Response(
+        print("WEBHOOK ERROR:", error)
+        return web.json_response(
+            {"ok": False},
             status=500,
-            text="Webhook error"
         )
-
-    return web.Response(
-        status=200,
-        text="OK"
-    )
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
-async def root_handler(request):
-
-    return web.Response(
-        text="𝕳𝖅𝕽𝟏⁹ AI Telegram Bot is online."
-    )
-
-
-async def health_handler(request):
-
-    return web.json_response({
-        "success": True,
-        "service": "HZR19 AI Telegram Bot",
-        "status": "online",
-        "mode": "webhook"
-    })
 
 
 # ============================================================
 # START SERVER
 # ============================================================
 
-async def start_server():
+async def main():
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
 
-    global APPLICATION
-
-    APPLICATION = (
-        Application
-        .builder()
+    telegram_app = (
+        Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Commands
-    APPLICATION.add_handler(
-        CommandHandler(
-            "start",
-            start_command
-        )
+    telegram_app.add_handler(
+        CommandHandler("start", start_command)
     )
 
-    APPLICATION.add_handler(
-        CommandHandler(
-            "help",
-            help_command
-        )
+    telegram_app.add_handler(
+        CommandHandler("help", help_command)
     )
 
-    APPLICATION.add_handler(
-        CommandHandler(
-            "status",
-            status_command
-        )
+    telegram_app.add_handler(
+        CallbackQueryHandler(callback_handler)
     )
 
-    # Suggestion buttons
-    APPLICATION.add_handler(
-        CallbackQueryHandler(
-            suggestion_callback,
-            pattern=r"^wiki:"
-        )
-    )
-
-    # Normal messages
-    APPLICATION.add_handler(
+    telegram_app.add_handler(
         MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            text_handler
+            filters.TEXT & ~filters.COMMAND,
+            message_handler,
         )
     )
 
-    # Initialize Telegram application
-    await APPLICATION.initialize()
-    await APPLICATION.start()
+    telegram_app.add_error_handler(error_handler)
 
-    webhook_url = (
-        RENDER_EXTERNAL_URL
-        + WEBHOOK_PATH
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    bot = telegram_app.bot
+
+    # Remove any old webhook and install the current Render webhook.
+    await bot.delete_webhook(drop_pending_updates=False)
+
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES,
     )
 
-    await APPLICATION.bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        drop_pending_updates=False
-    )
+    print("====================================")
+    print("        HZR19 AI TELEGRAM BOT")
+    print("====================================")
+    print(f"Webhook: {WEBHOOK_URL}")
+    print(f"Port: {PORT}")
+    print("Status: ONLINE")
+    print("====================================")
 
-    print(
-        "======================================"
-    )
-
-    print(
-        "𝕳𝖅𝕽𝟏⁹ AI TELEGRAM BOT"
-    )
-
-    print(
-        "MODE: WEBHOOK"
-    )
-
-    print(
-        "WEBHOOK:",
-        webhook_url
-    )
-
-    print(
-        "STATUS: ONLINE"
-    )
-
-    print(
-        "======================================"
-    )
-
-    # Web server
     app = web.Application()
 
-    app.router.add_get(
-        "/",
-        root_handler
-    )
+    app["telegram_app"] = telegram_app
+    app["telegram_bot"] = bot
 
-    app.router.add_get(
-        "/health",
-        health_handler
-    )
-
-    app.router.add_get(
-        "/api/status",
-        health_handler
-    )
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    app.router.add_get("/api/status", status)
 
     app.router.add_post(
         WEBHOOK_PATH,
-        webhook_handler
+        telegram_webhook,
     )
 
     runner = web.AppRunner(app)
@@ -1362,56 +1013,24 @@ async def start_server():
     site = web.TCPSite(
         runner,
         "0.0.0.0",
-        PORT
+        PORT,
     )
 
     await site.start()
 
-    print(
-        f"HTTP server running on port {PORT}"
-    )
-
     try:
-
-        await asyncio.Event().wait()
+        while True:
+            await asyncio.sleep(3600)
 
     finally:
-
-        print(
-            "Shutting down HZR19..."
-        )
+        await runner.cleanup()
 
         try:
-            await APPLICATION.bot.delete_webhook()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
         except Exception:
             pass
 
-        await runner.cleanup()
-
-        await APPLICATION.stop()
-        await APPLICATION.shutdown()
-
-        global HTTP_SESSION
-
-        if HTTP_SESSION:
-
-            await HTTP_SESSION.close()
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(
-            start_server()
-        )
-
-    except KeyboardInterrupt:
-
-        print(
-            "HZR19 stopped."
-)
+    asyncio.run(main())
